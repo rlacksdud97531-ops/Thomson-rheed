@@ -230,43 +230,52 @@ PNG / JPG / BMP / TIFF (8-bit 또는 16-bit grayscale OK)
         """
     )
     st.divider()
-    st.subheader("⚙️ Preprocessing")
-    st.caption("실험실 이미지(초록/검정 배경/깨진 phosphor)의 경우 아래 옵션 사용")
+    st.subheader("⚙️ 이미지 타입")
 
-    crop_mode = st.radio(
-        "📐 크롭 모드",
-        options=["None", "Smart (Shadow Edge)", "Auto (밝은 영역)", "Manual (아래쪽 %)"],
-        index=1,
+    image_type = st.radio(
+        "업로드할 이미지 종류",
+        options=[
+            "📂 학습 데이터와 동일 (깨끗한 그레이스케일)",
+            "🔬 실험실 원본 (초록 phosphor, 검정 배경)",
+            "🛠 직접 조정 (고급)",
+        ],
+        index=0,
         help=(
-            "**None**: 크롭 없음 — 학습 데이터와 같은 형식일 때\n\n"
-            "**Smart (Shadow Edge)**: RHEED 전용. 가로 검은 띠 아래만 사용 → "
-            "위쪽 깨진 phosphor / 긁힘 자동 제거 ⭐ 추천\n\n"
-            "**Auto (밝은 영역)**: 밝은 픽셀이 있는 bounding box만. "
-            "단순 검정 테두리만 있을 때\n\n"
-            "**Manual (아래쪽 %)**: 이미지 아래쪽 N%만 강제 사용 (확실한 방법)"
+            "**학습 데이터와 동일** — 이미 크롭되고 흑백인 이미지. 전처리 없음. "
+            "(기본값, 제일 정확)\n\n"
+            "**실험실 원본** — 카메라로 찍은 초록 phosphor 이미지. "
+            "자동으로 shadow edge 아래 부분만 추출 + 그레이스케일 변환\n\n"
+            "**직접 조정** — 크롭 모드와 그레이스케일을 수동으로 선택"
         ),
     )
 
-    manual_fraction = 0.55
-    if crop_mode == "Manual (아래쪽 %)":
-        manual_fraction = st.slider(
-            "아래쪽 비율",
-            min_value=0.30, max_value=0.90, value=0.55, step=0.05,
-            help="0.55 = 이미지 아래 55%만 사용",
+    # 프리셋에 따라 기본값 설정
+    if image_type == "📂 학습 데이터와 동일 (깨끗한 그레이스케일)":
+        crop_mode = "None"
+        grayscale = False
+        manual_fraction = 0.55
+    elif image_type == "🔬 실험실 원본 (초록 phosphor, 검정 배경)":
+        crop_mode = "Smart (Shadow Edge)"
+        grayscale = True
+        manual_fraction = 0.55
+    else:  # 직접 조정
+        crop_mode = st.selectbox(
+            "📐 크롭 모드",
+            options=["None", "Smart (Shadow Edge)", "Auto (밝은 영역)", "Manual (아래쪽 %)"],
+            index=0,
         )
+        manual_fraction = 0.55
+        if crop_mode == "Manual (아래쪽 %)":
+            manual_fraction = st.slider("아래쪽 비율", 0.30, 0.90, 0.55, 0.05)
+        grayscale = st.checkbox("⚫ 그레이스케일 변환", value=False)
 
-    grayscale = st.checkbox(
-        "⚫ 그레이스케일 변환 (초록 → 흑백)",
-        value=True,
-        help="초록 phosphor 이미지를 학습 분포와 같은 R=G=B 흑백으로 변환.",
-    )
     show_preprocessed = st.checkbox(
-        "🔍 전처리 결과 미리보기 표시",
-        value=True,
-        help="모델에 실제 들어가는 이미지를 확인",
+        "🔍 전처리 결과 미리보기",
+        value=False,
+        help="모델에 실제 들어가는 이미지를 확인 (실험실 원본 디버깅용)",
     )
 
-    # 내부용 플래그 (코드 호환성)
+    # 내부용 (코드 호환성)
     auto_crop = crop_mode != "None"
 
     st.divider()
