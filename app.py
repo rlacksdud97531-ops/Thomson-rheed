@@ -52,34 +52,86 @@ def safe_open_rgb(file_or_path) -> Image.Image:
     return img
 
 
-def auto_crop_bright_region(img: Image.Image, padding: int = 10,
-                             threshold_percentile: float = 5) -> Image.Image:
-    """이미지에서 밝은 영역(RHEED 패턴)만 자동 크롭.
-    검은 테두리, 반절이 검정인 이미지에서 실제 콘텐츠만 추출."""
+def find_shadow_edge_row(img: Image.Image) -> int:
+    """RHEED 특화: Shadow edge(검은 가로 띠) 위치를 찾음.
+    이미지를 가로줄마다 평균 밝기로 스캔해서 가장 어두운 띠를 찾음.
+    RHEED 패턴은 항상 이 shadow edge의 아래쪽에 있음."""
     arr = np.array(img.convert("RGB"))
-    # 픽셀 밝기 (max channel — 초록 phosphor에 강함)
     bright = np.max(arr, axis=2).astype(np.float32)
-    # 전체의 5% percentile보다 밝은 픽셀을 "콘텐츠"로 간주
+    row_means = bright.mean(axis=1)  # 각 가로줄의 평균 밝기
+
+    h = len(row_means)
+    # 너무 작은 이미지 예외처리
+    if h < 30:
+        return 0
+
+    # 이동평균으로 스무딩 (단일 픽셀 노이즈 무시)
+    window = max(5, h // 50)
+    kernel = np.ones(window, dtype=np.float32) / window
+    smoothed = np.convolve(row_means, kernel, mode="same")
+
+    # 이미지 상단 20% ~ 70% 구간에서 가장 어두운 가로줄이 shadow edge
+    # (맨 위 20%는 테두리일 가능성 ↑, 70% 이하는 RHEED 본체일 가능성 ↑)
+    s_start = int(h * 0.20)
+    s_end = int(h * 0.70)
+    if s_end <= s_start + 1:
+        return h // 3
+
+    local = smoothed[s_start:s_end]
+    edge_idx = int(np.argmin(local)) + s_start
+    return edge_idx
+
+
+def auto_crop_bright_region(img: Image.Image, padding: int = 10,
+                             threshold_percentile: float = 5,
+                             use_shadow_edge: bool = True) -> Image.Image:
+    """이미지에서 RHEED 패턴만 자동 크롭.
+    use_shadow_edge=True면: 먼저 shadow edge를 찾아 그 아래만 사용 → 위쪽 노이즈/깨진 phosphor 제거.
+    그 다음 밝기 기준 crop."""
+    arr = np.array(img.convert("RGB"))
+    h, w = arr.shape[:2]
+
+    # 1단계: Shadow edge 아래만 선택 (위쪽 노이즈 제거)
+    if use_shadow_edge:
+        edge = find_shadow_edge_row(img)
+        # Edge + 약간의 여유(window만큼 아래)부터 시작
+        safety = max(5, h // 60)
+        edge = min(edge + safety, h - 10)
+        arr = arr[edge:, :]  # 아래쪽만
+        if arr.size == 0 or arr.shape[0] < 20:
+            # 예외: edge 감지 실패 시 아래 절반 사용
+            arr = np.array(img.convert("RGB"))[h // 2:, :]
+
+    # 2단계: 남은 영역에서 밝은 부분만 crop (검은 테두리 제거)
+    bright = np.max(arr, axis=2).astype(np.float32)
     threshold = max(np.percentile(bright, 100 - threshold_percentile) * 0.1, 10)
     mask = bright > threshold
 
     rows_any = np.any(mask, axis=1)
     cols_any = np.any(mask, axis=0)
     if not rows_any.any() or not cols_any.any():
-        return img  # 빈 이미지면 그대로 반환
+        return Image.fromarray(arr.astype(np.uint8))
 
     r_min, r_max = np.where(rows_any)[0][[0, -1]]
     c_min, c_max = np.where(cols_any)[0][[0, -1]]
 
     # 패딩 추가
-    h, w = arr.shape[:2]
+    hh, ww = arr.shape[:2]
     r_min = max(0, r_min - padding)
-    r_max = min(h - 1, r_max + padding)
+    r_max = min(hh - 1, r_max + padding)
     c_min = max(0, c_min - padding)
-    c_max = min(w - 1, c_max + padding)
+    c_max = min(ww - 1, c_max + padding)
 
     cropped = arr[r_min:r_max + 1, c_min:c_max + 1]
     return Image.fromarray(cropped.astype(np.uint8))
+
+
+def manual_bottom_crop(img: Image.Image, bottom_fraction: float = 0.5) -> Image.Image:
+    """이미지의 아래쪽 N% 만 잘라서 반환. bottom_fraction=0.5 → 아래 절반."""
+    arr = np.array(img.convert("RGB"))
+    h = arr.shape[0]
+    start = int(h * (1 - bottom_fraction))
+    return Image.fromarray(arr[start:, :])
 
 
 def to_grayscale_rgb(img: Image.Image) -> Image.Image:
@@ -97,11 +149,23 @@ def to_grayscale_rgb(img: Image.Image) -> Image.Image:
     return Image.fromarray(rgb)
 
 
-def preprocess(img: Image.Image, auto_crop: bool = False,
+def apply_crop(img: Image.Image, crop_mode: str, manual_fraction: float = 0.55) -> Image.Image:
+    """크롭 모드에 따라 이미지 자름"""
+    if crop_mode == "Smart (Shadow Edge)":
+        return auto_crop_bright_region(img, use_shadow_edge=True)
+    elif crop_mode == "Auto (밝은 영역)":
+        return auto_crop_bright_region(img, use_shadow_edge=False)
+    elif crop_mode == "Manual (아래쪽 %)":
+        return manual_bottom_crop(img, bottom_fraction=manual_fraction)
+    else:
+        return img
+
+
+def preprocess(img: Image.Image, crop_mode: str = "None",
+               manual_fraction: float = 0.55,
                grayscale: bool = False) -> np.ndarray:
     """PIL 이미지 → 모델 입력용 (1, 260, 260, 3) float32 배열"""
-    if auto_crop:
-        img = auto_crop_bright_region(img)
+    img = apply_crop(img, crop_mode, manual_fraction)
     if grayscale:
         img = to_grayscale_rgb(img)
     img = img.resize(IMG_SIZE)
@@ -167,15 +231,30 @@ PNG / JPG / BMP / TIFF (8-bit 또는 16-bit grayscale OK)
     )
     st.divider()
     st.subheader("⚙️ Preprocessing")
-    st.caption(
-        "컬러(초록) 또는 검은 여백이 많은 실험실 이미지의 경우 아래 옵션을 켜면 정확도 ↑"
+    st.caption("실험실 이미지(초록/검정 배경/깨진 phosphor)의 경우 아래 옵션 사용")
+
+    crop_mode = st.radio(
+        "📐 크롭 모드",
+        options=["None", "Smart (Shadow Edge)", "Auto (밝은 영역)", "Manual (아래쪽 %)"],
+        index=1,
+        help=(
+            "**None**: 크롭 없음 — 학습 데이터와 같은 형식일 때\n\n"
+            "**Smart (Shadow Edge)**: RHEED 전용. 가로 검은 띠 아래만 사용 → "
+            "위쪽 깨진 phosphor / 긁힘 자동 제거 ⭐ 추천\n\n"
+            "**Auto (밝은 영역)**: 밝은 픽셀이 있는 bounding box만. "
+            "단순 검정 테두리만 있을 때\n\n"
+            "**Manual (아래쪽 %)**: 이미지 아래쪽 N%만 강제 사용 (확실한 방법)"
+        ),
     )
-    auto_crop = st.checkbox(
-        "🔲 자동 크롭 (검은 여백 제거)",
-        value=True,
-        help="이미지에서 밝은 영역만 자동 감지하여 crop. "
-             "검정 배경이 반절 이상일 때 필수.",
-    )
+
+    manual_fraction = 0.55
+    if crop_mode == "Manual (아래쪽 %)":
+        manual_fraction = st.slider(
+            "아래쪽 비율",
+            min_value=0.30, max_value=0.90, value=0.55, step=0.05,
+            help="0.55 = 이미지 아래 55%만 사용",
+        )
+
     grayscale = st.checkbox(
         "⚫ 그레이스케일 변환 (초록 → 흑백)",
         value=True,
@@ -183,9 +262,13 @@ PNG / JPG / BMP / TIFF (8-bit 또는 16-bit grayscale OK)
     )
     show_preprocessed = st.checkbox(
         "🔍 전처리 결과 미리보기 표시",
-        value=False,
+        value=True,
         help="모델에 실제 들어가는 이미지를 확인",
     )
+
+    # 내부용 플래그 (코드 호환성)
+    auto_crop = crop_mode != "None"
+
     st.divider()
     st.caption(f"TensorFlow: {tf.__version__}")
     st.caption("Developed by rlack · 2026")
@@ -217,7 +300,9 @@ if len(uploaded_files) > 1:
     for f in uploaded_files:
         try:
             img = safe_open_rgb(f)
-            arr = preprocess(img, auto_crop=auto_crop, grayscale=grayscale)
+            arr = preprocess(img, crop_mode=crop_mode,
+                             manual_fraction=manual_fraction,
+                             grayscale=grayscale)
             probs = model.predict(arr, verbose=0)[0]
             top_i = int(np.argmax(probs))
             summary_rows.append({
@@ -254,13 +339,13 @@ for f in uploaded_files:
         continue
 
     # 전처리된 이미지도 만들기 (미리보기 + 예측용)
-    preprocessed_img = img
-    if auto_crop:
-        preprocessed_img = auto_crop_bright_region(preprocessed_img)
+    preprocessed_img = apply_crop(img, crop_mode, manual_fraction)
     if grayscale:
         preprocessed_img = to_grayscale_rgb(preprocessed_img)
 
-    arr = preprocess(img, auto_crop=auto_crop, grayscale=grayscale)
+    arr = preprocess(img, crop_mode=crop_mode,
+                     manual_fraction=manual_fraction,
+                     grayscale=grayscale)
     probs = model.predict(arr, verbose=0)[0]
     top_i = int(np.argmax(probs))
     top_cls = CLASS_NAMES[top_i]
