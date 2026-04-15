@@ -116,6 +116,7 @@ PNG / JPG / BMP / TIFF (8-bit 또는 16-bit grayscale OK)
         """
     )
     st.divider()
+    st.caption(f"TensorFlow: {tf.__version__}")
     st.caption("Developed by rlack · 2026")
 
 # ─── 메인: 파일 업로더 ─────────────────────────────────────────────────────────
