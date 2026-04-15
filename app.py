@@ -52,8 +52,58 @@ def safe_open_rgb(file_or_path) -> Image.Image:
     return img
 
 
-def preprocess(img: Image.Image) -> np.ndarray:
+def auto_crop_bright_region(img: Image.Image, padding: int = 10,
+                             threshold_percentile: float = 5) -> Image.Image:
+    """이미지에서 밝은 영역(RHEED 패턴)만 자동 크롭.
+    검은 테두리, 반절이 검정인 이미지에서 실제 콘텐츠만 추출."""
+    arr = np.array(img.convert("RGB"))
+    # 픽셀 밝기 (max channel — 초록 phosphor에 강함)
+    bright = np.max(arr, axis=2).astype(np.float32)
+    # 전체의 5% percentile보다 밝은 픽셀을 "콘텐츠"로 간주
+    threshold = max(np.percentile(bright, 100 - threshold_percentile) * 0.1, 10)
+    mask = bright > threshold
+
+    rows_any = np.any(mask, axis=1)
+    cols_any = np.any(mask, axis=0)
+    if not rows_any.any() or not cols_any.any():
+        return img  # 빈 이미지면 그대로 반환
+
+    r_min, r_max = np.where(rows_any)[0][[0, -1]]
+    c_min, c_max = np.where(cols_any)[0][[0, -1]]
+
+    # 패딩 추가
+    h, w = arr.shape[:2]
+    r_min = max(0, r_min - padding)
+    r_max = min(h - 1, r_max + padding)
+    c_min = max(0, c_min - padding)
+    c_max = min(w - 1, c_max + padding)
+
+    cropped = arr[r_min:r_max + 1, c_min:c_max + 1]
+    return Image.fromarray(cropped.astype(np.uint8))
+
+
+def to_grayscale_rgb(img: Image.Image) -> Image.Image:
+    """컬러 이미지를 '학습 분포와 같은' 그레이스케일 RGB로 변환.
+    초록 phosphor RHEED 이미지를 R=G=B로 만들어 도메인 시프트 완화."""
+    arr = np.array(img.convert("RGB")).astype(np.float32)
+    # max channel (phosphor green에서 가장 강함) — 또는 luminance
+    gray = np.max(arr, axis=2)
+    # 0-255로 재정규화
+    mn, mx = gray.min(), gray.max()
+    if mx > mn:
+        gray = (gray - mn) / (mx - mn) * 255.0
+    # R=G=B
+    rgb = np.stack([gray, gray, gray], axis=-1).astype(np.uint8)
+    return Image.fromarray(rgb)
+
+
+def preprocess(img: Image.Image, auto_crop: bool = False,
+               grayscale: bool = False) -> np.ndarray:
     """PIL 이미지 → 모델 입력용 (1, 260, 260, 3) float32 배열"""
+    if auto_crop:
+        img = auto_crop_bright_region(img)
+    if grayscale:
+        img = to_grayscale_rgb(img)
     img = img.resize(IMG_SIZE)
     arr = np.array(img, dtype=np.float32) / 255.0  # 모델 내부 Rescaling(255)이 다시 [0,255]로
     return arr[np.newaxis]
@@ -116,6 +166,27 @@ PNG / JPG / BMP / TIFF (8-bit 또는 16-bit grayscale OK)
         """
     )
     st.divider()
+    st.subheader("⚙️ Preprocessing")
+    st.caption(
+        "컬러(초록) 또는 검은 여백이 많은 실험실 이미지의 경우 아래 옵션을 켜면 정확도 ↑"
+    )
+    auto_crop = st.checkbox(
+        "🔲 자동 크롭 (검은 여백 제거)",
+        value=True,
+        help="이미지에서 밝은 영역만 자동 감지하여 crop. "
+             "검정 배경이 반절 이상일 때 필수.",
+    )
+    grayscale = st.checkbox(
+        "⚫ 그레이스케일 변환 (초록 → 흑백)",
+        value=True,
+        help="초록 phosphor 이미지를 학습 분포와 같은 R=G=B 흑백으로 변환.",
+    )
+    show_preprocessed = st.checkbox(
+        "🔍 전처리 결과 미리보기 표시",
+        value=False,
+        help="모델에 실제 들어가는 이미지를 확인",
+    )
+    st.divider()
     st.caption(f"TensorFlow: {tf.__version__}")
     st.caption("Developed by rlack · 2026")
 
@@ -146,7 +217,7 @@ if len(uploaded_files) > 1:
     for f in uploaded_files:
         try:
             img = safe_open_rgb(f)
-            arr = preprocess(img)
+            arr = preprocess(img, auto_crop=auto_crop, grayscale=grayscale)
             probs = model.predict(arr, verbose=0)[0]
             top_i = int(np.argmax(probs))
             summary_rows.append({
@@ -182,7 +253,14 @@ for f in uploaded_files:
         st.error(f"❌ `{f.name}`: 이미지를 열 수 없습니다 ({e})")
         continue
 
-    arr = preprocess(img)
+    # 전처리된 이미지도 만들기 (미리보기 + 예측용)
+    preprocessed_img = img
+    if auto_crop:
+        preprocessed_img = auto_crop_bright_region(preprocessed_img)
+    if grayscale:
+        preprocessed_img = to_grayscale_rgb(preprocessed_img)
+
+    arr = preprocess(img, auto_crop=auto_crop, grayscale=grayscale)
     probs = model.predict(arr, verbose=0)[0]
     top_i = int(np.argmax(probs))
     top_cls = CLASS_NAMES[top_i]
@@ -194,8 +272,15 @@ for f in uploaded_files:
         col_img, col_res = st.columns([1, 1.3])
 
         with col_img:
-            st.image(img, caption=f"{img.size[0]}×{img.size[1]} px",
+            st.image(img, caption=f"원본: {img.size[0]}×{img.size[1]} px",
                      use_container_width=True)
+            if show_preprocessed and (auto_crop or grayscale):
+                st.image(
+                    preprocessed_img,
+                    caption=f"전처리 후: {preprocessed_img.size[0]}×{preprocessed_img.size[1]} px "
+                            f"→ 260×260으로 리사이즈되어 모델 입력",
+                    use_container_width=True,
+                )
 
         with col_res:
             # 큼직한 Top-1 결과
