@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Streamlit
+.streamlit/secrets.toml
+
+# 로컬 테스트 이미지 (실수로 커밋 방지)
+test_images/
+samples/
+*.tiff
+*.tif
+# 참고: 모델 파일(.keras)은 커밋해야 함 → 무시 안 함
