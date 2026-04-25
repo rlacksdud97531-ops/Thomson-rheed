@@ -378,9 +378,6 @@ for f in uploaded:
                     <div style="font-size:13px;color:#555;margin-top:2px;">
                         Confidence: <b>{conf*100:.1f}%</b>
                     </div>
-                    <div style="font-size:11px;color:#888;margin-top:6px;">
-                        {CLASS_DESC[cls]}
-                    </div>
                     {recon_html}
                 </div>
                 """,
