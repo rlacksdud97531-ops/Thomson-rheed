@@ -7,7 +7,7 @@ import os
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageFilter
 import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
@@ -48,17 +48,39 @@ def safe_open_rgb(src) -> Image.Image:
 
 
 def to_gray_stretched(img: Image.Image) -> np.ndarray:
-    """Convert to single-channel float [0,1] with percentile contrast stretch.
-    Uses max-channel so green phosphor signal is captured regardless of hue."""
-    arr = np.array(img.convert("RGB")).astype(np.float32)
-    gray = np.max(arr, axis=2)          # max-channel → brightest phosphor pixel
-    p_lo = np.percentile(gray, 1)
-    p_hi = np.percentile(gray, 99)
+    """Convert lab image to [0,1] grayscale matching training data distribution.
+
+    Steps:
+      1. Max-channel grayscale (captures green phosphor regardless of hue).
+      2. Flat-field correction: divide by large-Gaussian blur → removes circular
+         vignette gradient and equalises local illumination.
+      3. Percentile (p2–p98) contrast stretch → maps active range to [0, 1].
+    """
+    arr  = np.array(img.convert("RGB")).astype(np.float32)
+    gray = np.max(arr, axis=2)                        # (H, W) max-channel
+
+    # ── Flat-field correction ──────────────────────────────────────────────
+    # Large Gaussian blur estimates the slowly-varying background (vignette).
+    # Dividing removes it, leaving only the local streak contrast.
+    radius = max(30, min(gray.shape) // 7)
+    gray_u8 = np.clip(gray, 0, 255).astype(np.uint8)
+    bg = np.array(
+        Image.fromarray(gray_u8).filter(ImageFilter.GaussianBlur(radius=radius)),
+        dtype=np.float32,
+    )
+    bg   = np.maximum(bg, 1.0)                        # avoid division by zero
+    gray = np.clip(gray / bg, 0.0, None)              # background-normalised
+
+    # ── Percentile stretch ─────────────────────────────────────────────────
+    p_lo = np.percentile(gray, 2)
+    p_hi = np.percentile(gray, 98)
     if p_hi > p_lo:
         gray = np.clip((gray - p_lo) / (p_hi - p_lo), 0.0, 1.0)
     else:
-        gray = gray / 255.0
-    return gray                         # shape (H, W), float32, [0,1]
+        mx   = gray.max()
+        gray = (gray / mx) if mx > 0 else gray
+
+    return gray.astype(np.float32)                    # (H, W), [0, 1]
 
 
 def crop_roi_by_brightest(gray: np.ndarray,
