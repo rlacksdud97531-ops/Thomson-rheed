@@ -139,11 +139,6 @@ with st.sidebar:
     st.title("🔬 RHEED Classifier")
     st.markdown(
         """
-Classifies RHEED diffraction patterns into **4 categories** using a
-EfficientNetB2 deep learning model trained on ~1,500 images.
-
----
-
 **Classes**
 | | Class | Pattern |
 |---|---|---|
@@ -191,7 +186,13 @@ EfficientNetB2 deep learning model trained on ~1,500 images.
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 st.header("Upload RHEED Image(s)")
-st.caption("PNG / JPG / BMP / TIFF — 8-bit or 16-bit grayscale supported.")
+# Hide Streamlit's auto-generated "50MB per file • …" helper text
+st.markdown(
+    "<style>small.st-emotion-cache-1b2d9b5, "
+    "[data-testid='stFileUploaderDropzoneInstructions'] small { display:none !important; }"
+    "</style>",
+    unsafe_allow_html=True,
+)
 
 model = load_model()
 if model is None:
