@@ -61,23 +61,31 @@ def to_gray_stretched(img: Image.Image) -> np.ndarray:
     return gray                         # shape (H, W), float32, [0,1]
 
 
-def crop_roi_by_brightest(gray: np.ndarray, roi_fraction: float = 0.55) -> np.ndarray:
+def crop_roi_by_brightest(gray: np.ndarray,
+                          roi_fraction: float = 0.55,
+                          skip_top: float = 0.25) -> np.ndarray:
     """Square-crop around the brightest region of the RHEED pattern.
 
     Strategy:
-      1. Downsample to coarse block grid (avoids single hot pixels).
-      2. Find the block with maximum mean brightness → pattern center.
-      3. Cut a square of size (roi_fraction × min(H,W)) centred there.
+      1. Skip the top `skip_top` fraction (electron gun / direct beam area).
+      2. Downsample remaining area to coarse block grid (avoids single hot pixels).
+      3. Find the block with maximum mean brightness → pattern center.
+      4. Cut a square of size (roi_fraction × min(H,W)) centred there.
     """
     h, w = gray.shape
-    blk = max(1, min(h, w) // 30)
-    hb  = (h // blk) * blk
-    wb  = (w // blk) * blk
-    coarse = (gray[:hb, :wb]
+    # Exclude top portion — electron gun is always there, NOT the RHEED pattern
+    start = int(h * skip_top)
+    search = gray[start:, :]
+    sh, sw = search.shape
+    blk = max(1, min(sh, sw) // 30)
+    hb  = (sh // blk) * blk
+    wb  = (sw // blk) * blk
+    coarse = (search[:hb, :wb]
               .reshape(hb // blk, blk, wb // blk, blk)
               .mean(axis=(1, 3)))
     br, bc = np.unravel_index(np.argmax(coarse), coarse.shape)
-    cy = int(br * blk + blk // 2)
+    # Map back to full-image coordinates
+    cy = int(br * blk + blk // 2) + start
     cx = int(bc * blk + blk // 2)
     half = int(min(h, w) * roi_fraction / 2)
     y0 = max(0, cy - half);  y1 = min(h, cy + half)
@@ -87,11 +95,12 @@ def crop_roi_by_brightest(gray: np.ndarray, roi_fraction: float = 0.55) -> np.nd
 
 def preprocess(img: Image.Image,
                lab_mode: bool = False,
-               roi_fraction: float = 0.55) -> np.ndarray:
+               roi_fraction: float = 0.55,
+               skip_top: float = 0.25) -> np.ndarray:
     """Prepare image for model input → (1, 260, 260, 3) float32."""
     if lab_mode:
         gray = to_gray_stretched(img)
-        gray = crop_roi_by_brightest(gray, roi_fraction)
+        gray = crop_roi_by_brightest(gray, roi_fraction, skip_top)
         gray8 = (gray * 255).astype(np.uint8)
         rgb   = np.stack([gray8, gray8, gray8], axis=-1)
         img   = Image.fromarray(rgb)
@@ -100,10 +109,11 @@ def preprocess(img: Image.Image,
 
 
 def get_preprocessed_preview(img: Image.Image,
-                              roi_fraction: float = 0.55) -> Image.Image:
+                              roi_fraction: float = 0.55,
+                              skip_top: float = 0.25) -> Image.Image:
     """Return the grayscale ROI crop that the model actually sees (before resize)."""
     gray  = to_gray_stretched(img)
-    gray  = crop_roi_by_brightest(gray, roi_fraction)
+    gray  = crop_roi_by_brightest(gray, roi_fraction, skip_top)
     gray8 = (gray * 255).astype(np.uint8)
     rgb   = np.stack([gray8, gray8, gray8], axis=-1)
     return Image.fromarray(rgb)
@@ -162,6 +172,15 @@ with st.sidebar:
     )
 
     if lab_mode:
+        skip_top = st.slider(
+            "Skip top (%)",
+            min_value=0,
+            max_value=60,
+            value=25,
+            step=5,
+            help="Ignore the top N% of the image when finding the pattern center. "
+                 "Increase if the electron gun (bright top region) is being picked up instead of the RHEED pattern.",
+        ) / 100.0
         roi_fraction = st.slider(
             "ROI size",
             min_value=0.30,
@@ -174,6 +193,7 @@ with st.sidebar:
         show_preview = st.checkbox("Show preprocessed preview", value=True,
                                    help="Display the grayscale ROI the model actually sees.")
     else:
+        skip_top = 0.25
         roi_fraction = 0.55
         show_preview = False
 
@@ -218,7 +238,7 @@ if len(uploaded) > 1:
     for f in uploaded:
         try:
             img  = safe_open_rgb(f)
-            arr  = preprocess(img, lab_mode, roi_fraction)
+            arr  = preprocess(img, lab_mode, roi_fraction, skip_top)
             prob = model.predict(arr, verbose=0)[0]
             top  = int(np.argmax(prob))
             rows.append({
@@ -251,7 +271,7 @@ for f in uploaded:
         st.error(f"`{f.name}` could not be opened: {ex}")
         continue
 
-    arr  = preprocess(img, lab_mode, roi_fraction)
+    arr  = preprocess(img, lab_mode, roi_fraction, skip_top)
     prob = model.predict(arr, verbose=0)[0]
     top  = int(np.argmax(prob))
     cls  = CLASS_NAMES[top]
@@ -265,7 +285,7 @@ for f in uploaded:
             with c_orig:
                 st.image(img, caption=f"Original: {f.name}", use_container_width=True)
             with c_pre:
-                prev = get_preprocessed_preview(img, roi_fraction)
+                prev = get_preprocessed_preview(img, roi_fraction, skip_top)
                 st.image(prev, caption="Model input (ROI)", use_container_width=True)
         else:
             c_img, c_res = st.columns([1, 1.4])
