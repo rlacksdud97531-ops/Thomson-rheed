@@ -318,8 +318,3 @@ for f in uploaded:
             st.pyplot(fig)
             plt.close(fig)
 
-            if conf < 0.6:
-                st.warning(
-                    f"Low confidence ({conf*100:.1f}%). "
-                    "The image may be ambiguous or outside the training distribution."
-                )
