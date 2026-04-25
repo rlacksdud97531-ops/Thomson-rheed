@@ -193,31 +193,9 @@ with st.sidebar:
              "Leave OFF for pre-processed grayscale images.",
     )
 
-    if lab_mode:
-        skip_top = st.slider(
-            "Skip top (%)",
-            min_value=0,
-            max_value=60,
-            value=25,
-            step=5,
-            help="Ignore the top N% of the image when finding the pattern center. "
-                 "Increase if the electron gun (bright top region) is being picked up instead of the RHEED pattern.",
-        ) / 100.0
-        roi_fraction = st.slider(
-            "ROI size",
-            min_value=0.30,
-            max_value=0.90,
-            value=0.55,
-            step=0.05,
-            help="Fraction of the image used as ROI around the brightest point. "
-                 "Increase if pattern is cut off; decrease to zoom in tighter.",
-        )
-        show_preview = st.checkbox("Show preprocessed preview", value=True,
-                                   help="Display the grayscale ROI the model actually sees.")
-    else:
-        skip_top = 0.25
-        roi_fraction = 0.55
-        show_preview = False
+    skip_top     = 0.25   # exclude top 25 % (electron gun area)
+    roi_fraction = 0.55   # ROI = 55 % of min(H, W) around brightest point
+    show_preview = lab_mode  # always show preprocessing preview in lab mode
 
     st.divider()
     st.caption(f"Model: Thomson_5 · TF {tf.__version__}")
