@@ -86,29 +86,40 @@ def to_gray_stretched(img: Image.Image) -> np.ndarray:
 def crop_roi_by_brightest(gray: np.ndarray,
                           roi_fraction: float = 0.55,
                           skip_top: float = 0.25) -> np.ndarray:
-    """Square-crop around the brightest region of the RHEED pattern.
+    """Square-crop around the center-weighted brightest region of the RHEED pattern.
 
     Strategy:
-      1. Skip the top `skip_top` fraction (electron gun / direct beam area).
-      2. Downsample remaining area to coarse block grid (avoids single hot pixels).
-      3. Find the block with maximum mean brightness → pattern center.
-      4. Cut a square of size (roi_fraction × min(H,W)) centred there.
+      1. Apply a Gaussian weight centred on the image centre — strongly prefers
+         regions near the centre, so edge artefacts (phosphor rim, gun shadow)
+         cannot win even if they are locally bright.
+      2. Zero out the top `skip_top` fraction (electron gun area).
+      3. Find the block with maximum (brightness × centre_weight).
+      4. Crop a square of size (roi_fraction × min(H,W)) around that point.
     """
     h, w = gray.shape
-    # Exclude top portion — electron gun is always there, NOT the RHEED pattern
-    start = int(h * skip_top)
-    search = gray[start:, :]
-    sh, sw = search.shape
-    blk = max(1, min(sh, sw) // 30)
-    hb  = (sh // blk) * blk
-    wb  = (sw // blk) * blk
-    coarse = (search[:hb, :wb]
+
+    # Gaussian weight centred on the image (σ = 30 % of smaller dimension)
+    sigma = min(h, w) * 0.30
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    weight = np.exp(-((yy - h / 2) ** 2 + (xx - w / 2) ** 2) / (2 * sigma ** 2))
+
+    # Zero out gun area (top skip_top fraction)
+    weight[:int(h * skip_top), :] = 0.0
+
+    weighted = gray * weight
+
+    # Block-average to suppress single bright pixels
+    blk = max(1, min(h, w) // 30)
+    hb  = (h // blk) * blk
+    wb  = (w // blk) * blk
+    coarse = (weighted[:hb, :wb]
               .reshape(hb // blk, blk, wb // blk, blk)
               .mean(axis=(1, 3)))
+
     br, bc = np.unravel_index(np.argmax(coarse), coarse.shape)
-    # Map back to full-image coordinates
-    cy = int(br * blk + blk // 2) + start
+    cy = int(br * blk + blk // 2)
     cx = int(bc * blk + blk // 2)
+
     half = int(min(h, w) * roi_fraction / 2)
     y0 = max(0, cy - half);  y1 = min(h, cy + half)
     x0 = max(0, cx - half);  x1 = min(w, cx + half)
