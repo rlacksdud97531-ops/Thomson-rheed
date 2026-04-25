@@ -7,7 +7,7 @@ import os
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
@@ -31,6 +31,7 @@ CLASS_DESC   = {
 }
 IMG_SIZE = (260, 260)
 
+
 # ── Image preprocessing ────────────────────────────────────────────────────────
 def safe_open_rgb(src) -> Image.Image:
     """Open any RHEED image (8-bit / 16-bit grayscale / RGB) as RGB."""
@@ -46,48 +47,66 @@ def safe_open_rgb(src) -> Image.Image:
     return img
 
 
-def to_grayscale_rgb(img: Image.Image) -> Image.Image:
-    """Convert color phosphor image to grayscale-RGB to match training distribution."""
+def to_gray_stretched(img: Image.Image) -> np.ndarray:
+    """Convert to single-channel float [0,1] with percentile contrast stretch.
+    Uses max-channel so green phosphor signal is captured regardless of hue."""
     arr = np.array(img.convert("RGB")).astype(np.float32)
-    gray = np.max(arr, axis=2)
-    mn, mx = gray.min(), gray.max()
-    if mx > mn:
-        gray = (gray - mn) / (mx - mn) * 255.0
-    rgb = np.stack([gray, gray, gray], axis=-1).astype(np.uint8)
-    return Image.fromarray(rgb)
+    gray = np.max(arr, axis=2)          # max-channel → brightest phosphor pixel
+    p_lo = np.percentile(gray, 1)
+    p_hi = np.percentile(gray, 99)
+    if p_hi > p_lo:
+        gray = np.clip((gray - p_lo) / (p_hi - p_lo), 0.0, 1.0)
+    else:
+        gray = gray / 255.0
+    return gray                         # shape (H, W), float32, [0,1]
 
 
-def auto_crop(img: Image.Image, padding: int = 10) -> Image.Image:
-    """Crop to the bright RHEED pattern region, removing dark borders."""
-    arr = np.array(img.convert("RGB"))
-    bright = np.max(arr, axis=2).astype(np.float32)
-    # find shadow edge (darkest horizontal band in upper half)
-    h = bright.shape[0]
-    row_means = bright.mean(axis=1)
-    s, e = int(h * 0.2), int(h * 0.7)
-    edge = int(np.argmin(row_means[s:e])) + s + max(5, h // 60)
-    arr = arr[min(edge, h - 20):, :]
-    # crop dark borders
-    bright2 = np.max(arr, axis=2).astype(np.float32)
-    thr = max(np.percentile(bright2, 95) * 0.1, 10)
-    mask = bright2 > thr
-    rows = np.where(np.any(mask, axis=1))[0]
-    cols = np.where(np.any(mask, axis=0))[0]
-    if len(rows) == 0 or len(cols) == 0:
-        return Image.fromarray(arr.astype(np.uint8))
-    hh, ww = arr.shape[:2]
-    r0, r1 = max(0, rows[0] - padding), min(hh - 1, rows[-1] + padding)
-    c0, c1 = max(0, cols[0] - padding), min(ww - 1, cols[-1] + padding)
-    return Image.fromarray(arr[r0:r1+1, c0:c1+1].astype(np.uint8))
+def crop_roi_by_brightest(gray: np.ndarray, roi_fraction: float = 0.55) -> np.ndarray:
+    """Square-crop around the brightest region of the RHEED pattern.
+
+    Strategy:
+      1. Downsample to coarse block grid (avoids single hot pixels).
+      2. Find the block with maximum mean brightness → pattern center.
+      3. Cut a square of size (roi_fraction × min(H,W)) centred there.
+    """
+    h, w = gray.shape
+    blk = max(1, min(h, w) // 30)
+    hb  = (h // blk) * blk
+    wb  = (w // blk) * blk
+    coarse = (gray[:hb, :wb]
+              .reshape(hb // blk, blk, wb // blk, blk)
+              .mean(axis=(1, 3)))
+    br, bc = np.unravel_index(np.argmax(coarse), coarse.shape)
+    cy = int(br * blk + blk // 2)
+    cx = int(bc * blk + blk // 2)
+    half = int(min(h, w) * roi_fraction / 2)
+    y0 = max(0, cy - half);  y1 = min(h, cy + half)
+    x0 = max(0, cx - half);  x1 = min(w, cx + half)
+    return gray[y0:y1, x0:x1]
 
 
-def preprocess(img: Image.Image, lab_mode: bool = False) -> np.ndarray:
-    """Prepare image for model input: (1, 260, 260, 3) float32."""
+def preprocess(img: Image.Image,
+               lab_mode: bool = False,
+               roi_fraction: float = 0.55) -> np.ndarray:
+    """Prepare image for model input → (1, 260, 260, 3) float32."""
     if lab_mode:
-        img = auto_crop(img)
-        img = to_grayscale_rgb(img)
+        gray = to_gray_stretched(img)
+        gray = crop_roi_by_brightest(gray, roi_fraction)
+        gray8 = (gray * 255).astype(np.uint8)
+        rgb   = np.stack([gray8, gray8, gray8], axis=-1)
+        img   = Image.fromarray(rgb)
     img = img.resize(IMG_SIZE)
     return (np.array(img, dtype=np.float32) / 255.0)[np.newaxis]
+
+
+def get_preprocessed_preview(img: Image.Image,
+                              roi_fraction: float = 0.55) -> Image.Image:
+    """Return the grayscale ROI crop that the model actually sees (before resize)."""
+    gray  = to_gray_stretched(img)
+    gray  = crop_roi_by_brightest(gray, roi_fraction)
+    gray8 = (gray * 255).astype(np.uint8)
+    rgb   = np.stack([gray8, gray8, gray8], axis=-1)
+    return Image.fromarray(rgb)
 
 
 # ── Model loading ──────────────────────────────────────────────────────────────
@@ -143,9 +162,25 @@ EfficientNetB2 deep learning model trained on ~1,500 images.
         "Lab image mode",
         value=False,
         help="Turn ON for raw camera images (green phosphor, dark background). "
-             "Applies auto-crop + grayscale conversion. "
+             "Automatically extracts the bright RHEED region and converts to grayscale. "
              "Leave OFF for pre-processed grayscale images.",
     )
+
+    if lab_mode:
+        roi_fraction = st.slider(
+            "ROI size",
+            min_value=0.30,
+            max_value=0.90,
+            value=0.55,
+            step=0.05,
+            help="Fraction of the image used as ROI around the brightest point. "
+                 "Increase if pattern is cut off; decrease to zoom in tighter.",
+        )
+        show_preview = st.checkbox("Show preprocessed preview", value=True,
+                                   help="Display the grayscale ROI the model actually sees.")
+    else:
+        roi_fraction = 0.55
+        show_preview = False
 
     st.divider()
     st.caption(f"Model: Thomson_5 · TF {tf.__version__}")
@@ -182,7 +217,7 @@ if len(uploaded) > 1:
     for f in uploaded:
         try:
             img  = safe_open_rgb(f)
-            arr  = preprocess(img, lab_mode)
+            arr  = preprocess(img, lab_mode, roi_fraction)
             prob = model.predict(arr, verbose=0)[0]
             top  = int(np.argmax(prob))
             rows.append({
@@ -215,7 +250,7 @@ for f in uploaded:
         st.error(f"`{f.name}` could not be opened: {ex}")
         continue
 
-    arr  = preprocess(img, lab_mode)
+    arr  = preprocess(img, lab_mode, roi_fraction)
     prob = model.predict(arr, verbose=0)[0]
     top  = int(np.argmax(prob))
     cls  = CLASS_NAMES[top]
@@ -223,10 +258,18 @@ for f in uploaded:
     col  = CLASS_COLORS[top]
 
     with st.container(border=True):
-        c_img, c_res = st.columns([1, 1.4])
-
-        with c_img:
-            st.image(img, caption=f.name, use_container_width=True)
+        # ── Image columns ──────────────────────────────────────────────────
+        if lab_mode and show_preview:
+            c_orig, c_pre, c_res = st.columns([1, 1, 1.4])
+            with c_orig:
+                st.image(img, caption=f"Original: {f.name}", use_container_width=True)
+            with c_pre:
+                prev = get_preprocessed_preview(img, roi_fraction)
+                st.image(prev, caption="Model input (ROI)", use_container_width=True)
+        else:
+            c_img, c_res = st.columns([1, 1.4])
+            with c_img:
+                st.image(img, caption=f.name, use_container_width=True)
 
         with c_res:
             st.markdown(
