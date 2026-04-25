@@ -1,10 +1,9 @@
 """
-RHEED Image Classifier — Public Web App
-Thomson_5 모델 기반 4-class 분류기
+RHEED Pattern Classifier — Public Web App
+EfficientNetB2-based 4-class classifier
 (Modulated / Anomalous Spots / Spotty / Streaks)
 """
 import os
-import io
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -13,399 +12,250 @@ import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
 
-# ─── 페이지 설정 ────────────────────────────────────────────────────────────────
+# ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="RHEED Classifier",
     page_icon="🔬",
-    layout="wide",
-    initial_sidebar_state="expanded",
+    layout="centered",
 )
 
-# ─── 상수 ───────────────────────────────────────────────────────────────────────
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "Thomson_5.keras")
-CLASS_NAMES = ["Modulated", "Anomalous Spots", "Spotty", "Streaks"]
+# ── Constants ──────────────────────────────────────────────────────────────────
+MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Thomson_5.keras")
+CLASS_NAMES  = ["Modulated", "Anomalous Spots", "Spotty", "Streaks"]
 CLASS_COLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12"]
-CLASS_DESCRIPTIONS = {
-    "Modulated":       "Periodic intensity modulation along the streaks",
+CLASS_DESC   = {
+    "Modulated":       "Periodic intensity modulation along streaks",
     "Anomalous Spots": "Irregular bright spots (transmission-like diffraction)",
-    "Spotty":          "Discrete diffraction spots (3D island growth)",
-    "Streaks":         "Continuous streaks (smooth 2D layer growth)",
+    "Spotty":          "Discrete spots indicating 3D island growth",
+    "Streaks":         "Continuous streaks — smooth 2D layer growth",
 }
 IMG_SIZE = (260, 260)
 
-# ─── 이미지 전처리 (16-bit PNG 지원) ────────────────────────────────────────────
-def safe_open_rgb(file_or_path) -> Image.Image:
-    """16-bit 흑백 PNG / RGBA / L 모드 모두 처리해서 RGB 반환"""
-    img = Image.open(file_or_path)
+# ── Image preprocessing ────────────────────────────────────────────────────────
+def safe_open_rgb(src) -> Image.Image:
+    """Open any RHEED image (8-bit / 16-bit grayscale / RGB) as RGB."""
+    img = Image.open(src)
     if img.mode in ("I", "I;16", "I;16B"):
         arr = np.array(img, dtype=np.float32)
         mn, mx = arr.min(), arr.max()
         if mx > mn:
             arr = (arr - mn) / (mx - mn) * 255.0
         img = Image.fromarray(arr.astype(np.uint8)).convert("RGB")
-    elif img.mode == "L":
-        img = img.convert("RGB")
-    elif img.mode == "RGBA":
-        img = img.convert("RGB")
     elif img.mode != "RGB":
         img = img.convert("RGB")
     return img
 
 
-def find_shadow_edge_row(img: Image.Image) -> int:
-    """RHEED 특화: Shadow edge(검은 가로 띠) 위치를 찾음.
-    이미지를 가로줄마다 평균 밝기로 스캔해서 가장 어두운 띠를 찾음.
-    RHEED 패턴은 항상 이 shadow edge의 아래쪽에 있음."""
-    arr = np.array(img.convert("RGB"))
-    bright = np.max(arr, axis=2).astype(np.float32)
-    row_means = bright.mean(axis=1)  # 각 가로줄의 평균 밝기
-
-    h = len(row_means)
-    # 너무 작은 이미지 예외처리
-    if h < 30:
-        return 0
-
-    # 이동평균으로 스무딩 (단일 픽셀 노이즈 무시)
-    window = max(5, h // 50)
-    kernel = np.ones(window, dtype=np.float32) / window
-    smoothed = np.convolve(row_means, kernel, mode="same")
-
-    # 이미지 상단 20% ~ 70% 구간에서 가장 어두운 가로줄이 shadow edge
-    # (맨 위 20%는 테두리일 가능성 ↑, 70% 이하는 RHEED 본체일 가능성 ↑)
-    s_start = int(h * 0.20)
-    s_end = int(h * 0.70)
-    if s_end <= s_start + 1:
-        return h // 3
-
-    local = smoothed[s_start:s_end]
-    edge_idx = int(np.argmin(local)) + s_start
-    return edge_idx
-
-
-def auto_crop_bright_region(img: Image.Image, padding: int = 10,
-                             threshold_percentile: float = 5,
-                             use_shadow_edge: bool = True) -> Image.Image:
-    """이미지에서 RHEED 패턴만 자동 크롭.
-    use_shadow_edge=True면: 먼저 shadow edge를 찾아 그 아래만 사용 → 위쪽 노이즈/깨진 phosphor 제거.
-    그 다음 밝기 기준 crop."""
-    arr = np.array(img.convert("RGB"))
-    h, w = arr.shape[:2]
-
-    # 1단계: Shadow edge 아래만 선택 (위쪽 노이즈 제거)
-    if use_shadow_edge:
-        edge = find_shadow_edge_row(img)
-        # Edge + 약간의 여유(window만큼 아래)부터 시작
-        safety = max(5, h // 60)
-        edge = min(edge + safety, h - 10)
-        arr = arr[edge:, :]  # 아래쪽만
-        if arr.size == 0 or arr.shape[0] < 20:
-            # 예외: edge 감지 실패 시 아래 절반 사용
-            arr = np.array(img.convert("RGB"))[h // 2:, :]
-
-    # 2단계: 남은 영역에서 밝은 부분만 crop (검은 테두리 제거)
-    bright = np.max(arr, axis=2).astype(np.float32)
-    threshold = max(np.percentile(bright, 100 - threshold_percentile) * 0.1, 10)
-    mask = bright > threshold
-
-    rows_any = np.any(mask, axis=1)
-    cols_any = np.any(mask, axis=0)
-    if not rows_any.any() or not cols_any.any():
-        return Image.fromarray(arr.astype(np.uint8))
-
-    r_min, r_max = np.where(rows_any)[0][[0, -1]]
-    c_min, c_max = np.where(cols_any)[0][[0, -1]]
-
-    # 패딩 추가
-    hh, ww = arr.shape[:2]
-    r_min = max(0, r_min - padding)
-    r_max = min(hh - 1, r_max + padding)
-    c_min = max(0, c_min - padding)
-    c_max = min(ww - 1, c_max + padding)
-
-    cropped = arr[r_min:r_max + 1, c_min:c_max + 1]
-    return Image.fromarray(cropped.astype(np.uint8))
-
-
-def manual_bottom_crop(img: Image.Image, bottom_fraction: float = 0.5) -> Image.Image:
-    """이미지의 아래쪽 N% 만 잘라서 반환. bottom_fraction=0.5 → 아래 절반."""
-    arr = np.array(img.convert("RGB"))
-    h = arr.shape[0]
-    start = int(h * (1 - bottom_fraction))
-    return Image.fromarray(arr[start:, :])
-
-
 def to_grayscale_rgb(img: Image.Image) -> Image.Image:
-    """컬러 이미지를 '학습 분포와 같은' 그레이스케일 RGB로 변환.
-    초록 phosphor RHEED 이미지를 R=G=B로 만들어 도메인 시프트 완화."""
+    """Convert color phosphor image to grayscale-RGB to match training distribution."""
     arr = np.array(img.convert("RGB")).astype(np.float32)
-    # max channel (phosphor green에서 가장 강함) — 또는 luminance
     gray = np.max(arr, axis=2)
-    # 0-255로 재정규화
     mn, mx = gray.min(), gray.max()
     if mx > mn:
         gray = (gray - mn) / (mx - mn) * 255.0
-    # R=G=B
     rgb = np.stack([gray, gray, gray], axis=-1).astype(np.uint8)
     return Image.fromarray(rgb)
 
 
-def apply_crop(img: Image.Image, crop_mode: str, manual_fraction: float = 0.55) -> Image.Image:
-    """크롭 모드에 따라 이미지 자름"""
-    if crop_mode == "Smart (Shadow Edge)":
-        return auto_crop_bright_region(img, use_shadow_edge=True)
-    elif crop_mode == "Auto (밝은 영역)":
-        return auto_crop_bright_region(img, use_shadow_edge=False)
-    elif crop_mode == "Manual (아래쪽 %)":
-        return manual_bottom_crop(img, bottom_fraction=manual_fraction)
-    else:
-        return img
+def auto_crop(img: Image.Image, padding: int = 10) -> Image.Image:
+    """Crop to the bright RHEED pattern region, removing dark borders."""
+    arr = np.array(img.convert("RGB"))
+    bright = np.max(arr, axis=2).astype(np.float32)
+    # find shadow edge (darkest horizontal band in upper half)
+    h = bright.shape[0]
+    row_means = bright.mean(axis=1)
+    s, e = int(h * 0.2), int(h * 0.7)
+    edge = int(np.argmin(row_means[s:e])) + s + max(5, h // 60)
+    arr = arr[min(edge, h - 20):, :]
+    # crop dark borders
+    bright2 = np.max(arr, axis=2).astype(np.float32)
+    thr = max(np.percentile(bright2, 95) * 0.1, 10)
+    mask = bright2 > thr
+    rows = np.where(np.any(mask, axis=1))[0]
+    cols = np.where(np.any(mask, axis=0))[0]
+    if len(rows) == 0 or len(cols) == 0:
+        return Image.fromarray(arr.astype(np.uint8))
+    hh, ww = arr.shape[:2]
+    r0, r1 = max(0, rows[0] - padding), min(hh - 1, rows[-1] + padding)
+    c0, c1 = max(0, cols[0] - padding), min(ww - 1, cols[-1] + padding)
+    return Image.fromarray(arr[r0:r1+1, c0:c1+1].astype(np.uint8))
 
 
-def preprocess(img: Image.Image, crop_mode: str = "None",
-               manual_fraction: float = 0.55,
-               grayscale: bool = False) -> np.ndarray:
-    """PIL 이미지 → 모델 입력용 (1, 260, 260, 3) float32 배열"""
-    img = apply_crop(img, crop_mode, manual_fraction)
-    if grayscale:
+def preprocess(img: Image.Image, lab_mode: bool = False) -> np.ndarray:
+    """Prepare image for model input: (1, 260, 260, 3) float32."""
+    if lab_mode:
+        img = auto_crop(img)
         img = to_grayscale_rgb(img)
     img = img.resize(IMG_SIZE)
-    arr = np.array(img, dtype=np.float32) / 255.0  # 모델 내부 Rescaling(255)이 다시 [0,255]로
-    return arr[np.newaxis]
+    return (np.array(img, dtype=np.float32) / 255.0)[np.newaxis]
 
 
-# ─── 모델 로드 (캐시) ───────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner="🔬 모델 로딩 중... (최초 1회만)")
+# ── Model loading ──────────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner="Loading model…")
 def load_model():
     if not os.path.exists(MODEL_PATH):
         return None
     return keras.models.load_model(MODEL_PATH)
 
 
-# ─── 예측 플롯 ─────────────────────────────────────────────────────────────────
-def plot_probabilities(probs, class_names, colors):
-    fig, ax = plt.subplots(figsize=(7, 3.2))
-    ax.barh(class_names, probs * 100, color=colors)
+# ── Probability bar chart ──────────────────────────────────────────────────────
+def plot_probs(probs):
+    fig, ax = plt.subplots(figsize=(6, 2.8))
+    bars = ax.barh(CLASS_NAMES, probs * 100, color=CLASS_COLORS)
     ax.set_xlim(0, 100)
-    ax.set_xlabel("Probability (%)")
+    ax.set_xlabel("Confidence (%)")
     ax.invert_yaxis()
-    for i, p in enumerate(probs):
-        ax.text(p * 100 + 1, i, f"{p*100:.2f}%", va="center", fontsize=10)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    for bar, p in zip(bars, probs):
+        ax.text(p * 100 + 1, bar.get_y() + bar.get_height() / 2,
+                f"{p*100:.1f}%", va="center", fontsize=9)
+    ax.spines[["top", "right"]].set_visible(False)
     plt.tight_layout()
     return fig
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# UI
-# ═══════════════════════════════════════════════════════════════════════════════
-st.title("🔬 RHEED Image Classifier")
-st.caption(
-    "Reflection High-Energy Electron Diffraction 패턴을 4개 클래스로 분류합니다. "
-    "*Powered by EfficientNet-based deep learning (Thomson_5 model).*"
-)
-
-# ─── 사이드바: 모델 정보 + 사용법 ───────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Sidebar
+# ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.header("ℹ️ About")
+    st.title("🔬 RHEED Classifier")
     st.markdown(
         """
-**Model:** Thomson_5 (EfficientNetB2 + Transfer Learning)
-**Input size:** 260 × 260 RGB
-**Classes:** 4
-- 🔴 **Modulated** — periodic intensity modulation
-- 🔵 **Anomalous Spots** — irregular transmission spots
-- 🟢 **Spotty** — discrete 3D diffraction spots
-- 🟡 **Streaks** — smooth 2D streaks
+Classifies RHEED diffraction patterns into **4 categories** using a
+EfficientNetB2 deep learning model trained on ~1,500 images.
 
 ---
 
-**How to use**
-1. Upload RHEED image(s) below
-2. Model predicts class + confidence
-3. See probability bars for all 4 classes
+**Classes**
+| | Class | Pattern |
+|---|---|---|
+| 🔴 | Modulated | Periodic streak modulation |
+| 🔵 | Anomalous Spots | Irregular transmission spots |
+| 🟢 | Spotty | Discrete 3D island spots |
+| 🟡 | Streaks | Smooth 2D growth streaks |
 
-**Supported formats:**
-PNG / JPG / BMP / TIFF (8-bit 또는 16-bit grayscale OK)
-        """
-    )
-    st.divider()
-    st.subheader("⚙️ 이미지 타입")
+---
 
-    image_type = st.radio(
-        "업로드할 이미지 종류",
-        options=[
-            "📂 학습 데이터와 동일 (깨끗한 그레이스케일)",
-            "🔬 실험실 원본 (초록 phosphor, 검정 배경)",
-            "🛠 직접 조정 (고급)",
-        ],
-        index=0,
-        help=(
-            "**학습 데이터와 동일** — 이미 크롭되고 흑백인 이미지. 전처리 없음. "
-            "(기본값, 제일 정확)\n\n"
-            "**실험실 원본** — 카메라로 찍은 초록 phosphor 이미지. "
-            "자동으로 shadow edge 아래 부분만 추출 + 그레이스케일 변환\n\n"
-            "**직접 조정** — 크롭 모드와 그레이스케일을 수동으로 선택"
-        ),
+**Image type**
+"""
     )
 
-    # 프리셋에 따라 기본값 설정
-    if image_type == "📂 학습 데이터와 동일 (깨끗한 그레이스케일)":
-        crop_mode = "None"
-        grayscale = False
-        manual_fraction = 0.55
-    elif image_type == "🔬 실험실 원본 (초록 phosphor, 검정 배경)":
-        crop_mode = "Smart (Shadow Edge)"
-        grayscale = True
-        manual_fraction = 0.55
-    else:  # 직접 조정
-        crop_mode = st.selectbox(
-            "📐 크롭 모드",
-            options=["None", "Smart (Shadow Edge)", "Auto (밝은 영역)", "Manual (아래쪽 %)"],
-            index=0,
-        )
-        manual_fraction = 0.55
-        if crop_mode == "Manual (아래쪽 %)":
-            manual_fraction = st.slider("아래쪽 비율", 0.30, 0.90, 0.55, 0.05)
-        grayscale = st.checkbox("⚫ 그레이스케일 변환", value=False)
-
-    show_preprocessed = st.checkbox(
-        "🔍 전처리 결과 미리보기",
+    lab_mode = st.toggle(
+        "Lab image mode",
         value=False,
-        help="모델에 실제 들어가는 이미지를 확인 (실험실 원본 디버깅용)",
+        help="Turn ON for raw camera images (green phosphor, dark background). "
+             "Applies auto-crop + grayscale conversion. "
+             "Leave OFF for pre-processed grayscale images.",
     )
 
-    # 내부용 (코드 호환성)
-    auto_crop = crop_mode != "None"
-
     st.divider()
-    st.caption(f"TensorFlow: {tf.__version__}")
-    st.caption("Developed by rlack · 2026")
+    st.caption(f"Model: Thomson_5 · TF {tf.__version__}")
+    st.caption("© 2026 rlack")
 
-# ─── 메인: 파일 업로더 ─────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════════════════════
+st.header("Upload RHEED Image(s)")
+st.caption("PNG / JPG / BMP / TIFF — 8-bit or 16-bit grayscale supported.")
+
 model = load_model()
 if model is None:
-    st.error(f"❌ 모델 파일을 찾을 수 없습니다: `{MODEL_PATH}`")
+    st.error(f"Model file not found: `{MODEL_PATH}`")
     st.stop()
 
-uploaded_files = st.file_uploader(
-    "RHEED 이미지를 업로드하세요 (여러 장 한꺼번에 OK)",
+uploaded = st.file_uploader(
+    "Drop files here or click to browse",
     type=["png", "jpg", "jpeg", "bmp", "tif", "tiff"],
     accept_multiple_files=True,
-    help="드래그&드롭 또는 클릭해서 선택. 여러 장 한꺼번에 업로드 가능합니다.",
+    label_visibility="collapsed",
 )
 
-if not uploaded_files:
-    st.info("👆 위에서 이미지를 업로드해주세요.")
+if not uploaded:
+    st.info("Upload one or more RHEED images to get started.")
     st.stop()
 
-# ─── 일괄 예측 ─────────────────────────────────────────────────────────────────
-st.divider()
-st.subheader(f"📊 예측 결과 ({len(uploaded_files)}장)")
-
-# 여러 장이면 먼저 요약 테이블
-if len(uploaded_files) > 1:
-    summary_rows = []
-    for f in uploaded_files:
+# ── Batch summary (multiple files) ────────────────────────────────────────────
+if len(uploaded) > 1:
+    st.divider()
+    st.subheader(f"Summary — {len(uploaded)} images")
+    rows = []
+    for f in uploaded:
         try:
-            img = safe_open_rgb(f)
-            arr = preprocess(img, crop_mode=crop_mode,
-                             manual_fraction=manual_fraction,
-                             grayscale=grayscale)
-            probs = model.predict(arr, verbose=0)[0]
-            top_i = int(np.argmax(probs))
-            summary_rows.append({
-                "파일": f.name,
-                "예측": CLASS_NAMES[top_i],
-                "신뢰도": f"{probs[top_i]*100:.2f}%",
-                **{cn: f"{p*100:.1f}%" for cn, p in zip(CLASS_NAMES, probs)},
+            img  = safe_open_rgb(f)
+            arr  = preprocess(img, lab_mode)
+            prob = model.predict(arr, verbose=0)[0]
+            top  = int(np.argmax(prob))
+            rows.append({
+                "File": f.name,
+                "Prediction": CLASS_NAMES[top],
+                "Confidence": f"{prob[top]*100:.1f}%",
+                **{c: f"{p*100:.1f}%" for c, p in zip(CLASS_NAMES, prob)},
             })
-            f.seek(0)  # 다시 읽을 수 있게 포인터 리셋
-        except Exception as e:
-            summary_rows.append({
-                "파일": f.name, "예측": "오류", "신뢰도": "-",
-                **{cn: "-" for cn in CLASS_NAMES},
-            })
-    df = pd.DataFrame(summary_rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+            f.seek(0)
+        except Exception as ex:
+            rows.append({"File": f.name, "Prediction": "Error",
+                         "Confidence": str(ex),
+                         **{c: "-" for c in CLASS_NAMES}})
 
-    # 다운로드 버튼
-    csv = df.to_csv(index=False).encode("utf-8-sig")
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
     st.download_button(
-        "📥 결과를 CSV로 다운로드",
-        data=csv,
-        file_name="rheed_predictions.csv",
+        "⬇️ Download CSV",
+        data=df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="rheed_results.csv",
         mime="text/csv",
     )
     st.divider()
 
-# 각 파일 상세
-for f in uploaded_files:
+# ── Per-image detail ──────────────────────────────────────────────────────────
+for f in uploaded:
     try:
         img = safe_open_rgb(f)
-    except Exception as e:
-        st.error(f"❌ `{f.name}`: 이미지를 열 수 없습니다 ({e})")
+    except Exception as ex:
+        st.error(f"`{f.name}` could not be opened: {ex}")
         continue
 
-    # 전처리된 이미지도 만들기 (미리보기 + 예측용)
-    preprocessed_img = apply_crop(img, crop_mode, manual_fraction)
-    if grayscale:
-        preprocessed_img = to_grayscale_rgb(preprocessed_img)
-
-    arr = preprocess(img, crop_mode=crop_mode,
-                     manual_fraction=manual_fraction,
-                     grayscale=grayscale)
-    probs = model.predict(arr, verbose=0)[0]
-    top_i = int(np.argmax(probs))
-    top_cls = CLASS_NAMES[top_i]
-    top_conf = probs[top_i]
-    top_color = CLASS_COLORS[top_i]
+    arr  = preprocess(img, lab_mode)
+    prob = model.predict(arr, verbose=0)[0]
+    top  = int(np.argmax(prob))
+    cls  = CLASS_NAMES[top]
+    conf = float(prob[top])
+    col  = CLASS_COLORS[top]
 
     with st.container(border=True):
-        st.markdown(f"### 📄 `{f.name}`")
-        col_img, col_res = st.columns([1, 1.3])
+        c_img, c_res = st.columns([1, 1.4])
 
-        with col_img:
-            st.image(img, caption=f"원본: {img.size[0]}×{img.size[1]} px",
-                     use_container_width=True)
-            if show_preprocessed and (auto_crop or grayscale):
-                st.image(
-                    preprocessed_img,
-                    caption=f"전처리 후: {preprocessed_img.size[0]}×{preprocessed_img.size[1]} px "
-                            f"→ 260×260으로 리사이즈되어 모델 입력",
-                    use_container_width=True,
-                )
+        with c_img:
+            st.image(img, caption=f.name, use_container_width=True)
 
-        with col_res:
-            # 큼직한 Top-1 결과
+        with c_res:
             st.markdown(
                 f"""
-                <div style="padding:16px;border-radius:10px;
-                            background:{top_color}22;border-left:6px solid {top_color};
-                            margin-bottom:12px;">
-                    <div style="font-size:13px;color:#666;">Predicted class</div>
-                    <div style="font-size:28px;font-weight:700;color:{top_color};">
-                        {top_cls}
+                <div style="padding:14px;border-radius:8px;
+                            background:{col}18;border-left:5px solid {col};
+                            margin-bottom:10px;">
+                    <div style="font-size:11px;color:#888;letter-spacing:.5px;">
+                        PREDICTION
                     </div>
-                    <div style="font-size:15px;color:#333;margin-top:4px;">
-                        Confidence: <b>{top_conf*100:.2f}%</b>
+                    <div style="font-size:26px;font-weight:700;color:{col};">
+                        {cls}
                     </div>
-                    <div style="font-size:12px;color:#666;margin-top:6px;">
-                        {CLASS_DESCRIPTIONS[top_cls]}
+                    <div style="font-size:13px;color:#555;margin-top:2px;">
+                        Confidence: <b>{conf*100:.1f}%</b>
+                    </div>
+                    <div style="font-size:11px;color:#888;margin-top:6px;">
+                        {CLASS_DESC[cls]}
                     </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-
-            # 확률 막대
-            fig = plot_probabilities(probs, CLASS_NAMES, CLASS_COLORS)
+            fig = plot_probs(prob)
             st.pyplot(fig)
             plt.close(fig)
 
-            # 낮은 신뢰도 경고
-            if top_conf < 0.6:
+            if conf < 0.6:
                 st.warning(
-                    f"⚠️ 낮은 신뢰도 ({top_conf*100:.1f}%). "
-                    "이미지가 모호하거나 학습 분포와 다를 수 있습니다."
+                    f"Low confidence ({conf*100:.1f}%). "
+                    "The image may be ambiguous or outside the training distribution."
                 )
