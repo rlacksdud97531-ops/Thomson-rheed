@@ -149,6 +149,57 @@ def load_model():
     return keras.models.load_model(MODEL_PATH)
 
 
+# ── Surface reconstruction from streak spacing ────────────────────────────────
+def detect_reconstruction(model_input: np.ndarray) -> str:
+    """Estimate surface reconstruction from horizontal streak spacing.
+    model_input: (260, 260, 3) float32 — the array the model already received.
+    Returns e.g. '1×1', '2×1', '√2×√2 R45°', or '—'.
+    """
+    gray = model_input.mean(axis=2)          # (H, W)
+    h, w = gray.shape
+
+    # Horizontal profile: mean over middle rows (skip gun shadow & bottom noise)
+    r0, r1 = int(h * 0.25), int(h * 0.70)
+    profile = gray[r0:r1].mean(axis=0)       # (W,)
+
+    # Smooth with ~3 % of width
+    k = max(3, w // 35)
+    profile = np.convolve(profile, np.ones(k) / k, mode='same')
+
+    pmax = profile.max()
+    if pmax < 0.03:
+        return "—"
+    profile /= pmax
+
+    # Local maxima above 15 % of peak
+    peaks = [i for i in range(1, w - 1)
+             if profile[i] > profile[i - 1]
+             and profile[i] > profile[i + 1]
+             and profile[i] > 0.15]
+
+    if len(peaks) < 2:
+        return "—"
+
+    peaks.sort()
+    gaps = [peaks[j + 1] - peaks[j] for j in range(len(peaks) - 1)]
+    d_max = max(gaps)
+    d_min = min(gaps)
+
+    if d_max == 0:
+        return "—"
+
+    ratio = d_min / d_max
+
+    if ratio > 0.82:      # evenly spaced → bulk periodicity
+        return "1×1"
+    elif ratio > 0.60:    # ≈ 1/√2 ≈ 0.707
+        return "√2×√2 R45°"
+    elif ratio > 0.35:    # ≈ 1/2 = 0.50
+        return "2×1"
+    else:
+        return "—"
+
+
 # ── Probability bar chart ──────────────────────────────────────────────────────
 def plot_probs(probs):
     fig, ax = plt.subplots(figsize=(6, 2.8))
@@ -293,6 +344,15 @@ for f in uploaded:
                 st.image(img, caption=f.name, use_container_width=True)
 
         with c_res:
+            # Surface reconstruction (only for ordered 2D surfaces)
+            recon_html = ""
+            if cls in ("Streaks", "Modulated"):
+                recon = detect_reconstruction(arr[0])
+                recon_html = (
+                    f'<div style="font-size:12px;color:#555;margin-top:8px;">'
+                    f'<b>Surface reconstruction:</b> {recon}</div>'
+                )
+
             st.markdown(
                 f"""
                 <div style="padding:14px;border-radius:8px;
@@ -310,6 +370,7 @@ for f in uploaded:
                     <div style="font-size:11px;color:#888;margin-top:6px;">
                         {CLASS_DESC[cls]}
                     </div>
+                    {recon_html}
                 </div>
                 """,
                 unsafe_allow_html=True,
