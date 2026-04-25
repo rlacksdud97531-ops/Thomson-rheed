@@ -62,7 +62,7 @@ def to_gray_stretched(img: Image.Image) -> np.ndarray:
     # ── Flat-field correction ──────────────────────────────────────────────
     # Large Gaussian blur estimates the slowly-varying background (vignette).
     # Dividing removes it, leaving only the local streak contrast.
-    radius = max(30, min(gray.shape) // 7)
+    radius = max(40, min(gray.shape) // 4)
     gray_u8 = np.clip(gray, 0, 255).astype(np.uint8)
     bg = np.array(
         Image.fromarray(gray_u8).filter(ImageFilter.GaussianBlur(radius=radius)),
