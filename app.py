@@ -151,6 +151,32 @@ def preprocess(img: Image.Image,
     return (np.array(img, dtype=np.float32) / 255.0)[np.newaxis]
 
 
+def predict_tta(model, img: Image.Image,
+                lab_mode: bool = False,
+                roi_fraction: float = 0.55,
+                skip_top: float = 0.25) -> np.ndarray:
+    """Test Time Augmentation: 4방향 flip 예측 평균 → 더 안정적인 확률값."""
+    if lab_mode:
+        gray = to_gray_stretched(img)
+        gray = crop_roi_by_brightest(gray, roi_fraction, skip_top)
+        gray8 = (gray * 255).astype(np.uint8)
+        base  = Image.fromarray(np.stack([gray8, gray8, gray8], axis=-1))
+    else:
+        base = img
+
+    variants = [
+        base,
+        ImageOps.mirror(base),          # 좌우 flip
+        ImageOps.flip(base),            # 상하 flip
+        ImageOps.mirror(ImageOps.flip(base)),  # 180° 회전
+    ]
+    probs = []
+    for v in variants:
+        arr = (np.array(v.resize(IMG_SIZE), dtype=np.float32) / 255.0)[np.newaxis]
+        probs.append(model.predict(arr, verbose=0)[0])
+    return np.mean(probs, axis=0)
+
+
 def get_preprocessed_preview(img: Image.Image,
                               roi_fraction: float = 0.55,
                               skip_top: float = 0.25) -> Image.Image:
@@ -310,8 +336,7 @@ if len(uploaded) > 1:
     for f in uploaded:
         try:
             img  = safe_open_rgb(f)
-            arr  = preprocess(img, lab_mode, roi_fraction, skip_top)
-            prob = model.predict(arr, verbose=0)[0]
+            prob = predict_tta(model, img, lab_mode, roi_fraction, skip_top)
             top  = int(np.argmax(prob))
             rows.append({
                 "File": f.name,
@@ -343,8 +368,7 @@ for f in uploaded:
         st.error(f"`{f.name}` could not be opened: {ex}")
         continue
 
-    arr  = preprocess(img, lab_mode, roi_fraction, skip_top)
-    prob = model.predict(arr, verbose=0)[0]
+    prob = predict_tta(model, img, lab_mode, roi_fraction, skip_top)
     top  = int(np.argmax(prob))
     cls  = CLASS_NAMES[top]
     conf = float(prob[top])
