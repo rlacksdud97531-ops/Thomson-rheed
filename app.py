@@ -41,11 +41,20 @@ def safe_open_rgb(src) -> Image.Image:
     return img
 
 
+# ── Grayscale conversion ──────────────────────────────────────────────────────
+def to_grayscale_rgb(img: Image.Image) -> Image.Image:
+    """초록 인광 → 회색조 변환 (R=G=B), 모델은 3채널 RGB 입력 받으므로 RGB로 다시 변환."""
+    return img.convert("L").convert("RGB")
+
+
 # ── Preprocessing ──────────────────────────────────────────────────────────────
-def preprocess(img: Image.Image) -> np.ndarray:
-    """Resize and normalize → (1, 260, 260, 3) float32."""
-    img = img.resize(IMG_SIZE)
-    return (np.array(img, dtype=np.float32) / 255.0)[np.newaxis]
+def preprocess(img: Image.Image) -> tuple[np.ndarray, Image.Image]:
+    """Grayscale → resize → normalize → (1, 260, 260, 3) float32.
+    Returns (array, gray_img) — gray_img는 시각화용."""
+    gray = to_grayscale_rgb(img)
+    resized = gray.resize(IMG_SIZE)
+    arr = (np.array(resized, dtype=np.float32) / 255.0)[np.newaxis]
+    return arr, gray
 
 
 # ── Model loading ──────────────────────────────────────────────────────────────
@@ -122,7 +131,7 @@ if len(uploaded) > 1:
     for f in uploaded:
         try:
             img  = safe_open_rgb(f)
-            arr  = preprocess(img)
+            arr, _gray = preprocess(img)
             prob = model.predict(arr, verbose=0)[0]
             top  = int(np.argmax(prob))
             rows.append({
@@ -155,7 +164,7 @@ for f in uploaded:
         st.error(f"`{f.name}` could not be opened: {ex}")
         continue
 
-    arr  = preprocess(img)
+    arr, gray_img = preprocess(img)
     prob = model.predict(arr, verbose=0)[0]
     top  = int(np.argmax(prob))
     cls  = CLASS_NAMES[top]
@@ -163,9 +172,11 @@ for f in uploaded:
     col  = CLASS_COLORS[top]
 
     with st.container(border=True):
-        c_orig, c_res = st.columns([1, 1.4])
+        c_orig, c_gray, c_res = st.columns([1, 1, 1.4])
         with c_orig:
-            st.image(img, caption=f.name, use_container_width=True)
+            st.image(img, caption=f"Original: {f.name}", use_container_width=True)
+        with c_gray:
+            st.image(gray_img, caption="Model input (grayscale)", use_container_width=True)
         with c_res:
             st.markdown(
                 f"""
