@@ -72,7 +72,7 @@ def to_gray_stretched(img: Image.Image) -> np.ndarray:
         Image.fromarray(gray_u8).filter(ImageFilter.GaussianBlur(radius=radius)),
         dtype=np.float32,
     )
-    gray = np.clip(gray - bg * 0.85, 0.0, None)      # subtract background trend
+    gray = np.clip(gray - bg * 0.92, 0.0, None)      # subtract background trend
 
     # ── Percentile stretch ─────────────────────────────────────────────────
     p_lo = np.percentile(gray, 2)
@@ -82,6 +82,11 @@ def to_gray_stretched(img: Image.Image) -> np.ndarray:
     else:
         mx   = gray.max()
         gray = (gray / mx) if mx > 0 else gray
+
+    # ── Gamma correction ───────────────────────────────────────────────────
+    # γ > 1 suppresses residual background (dark pixels → darker) while
+    # keeping streak peaks close to 1.0, matching training data contrast.
+    gray = np.power(gray, 1.5)
 
     return gray.astype(np.float32)                    # (H, W), [0, 1]
 
