@@ -298,22 +298,11 @@ with st.sidebar:
 | 🟡 | Streaks | Smooth 2D growth streaks |
 
 ---
-
-**Image type**
 """
     )
 
-    lab_mode = st.toggle(
-        "Lab image mode",
-        value=False,
-        help="Turn ON for raw camera images (green phosphor, dark background). "
-             "Automatically extracts the bright RHEED region and converts to grayscale. "
-             "Leave OFF for pre-processed grayscale images.",
-    )
-
-    skip_top     = 0.25   # exclude top 25 % (electron gun area)
-    roi_fraction = 0.55   # ROI = 55 % of min(H, W) around brightest point
-    show_preview = lab_mode  # always show preprocessing preview in lab mode
+    skip_top     = 0.25
+    roi_fraction = 0.55
 
     st.divider()
     st.caption(f"Model: Thomson_5 · TF {tf.__version__}")
@@ -412,7 +401,7 @@ for f in uploaded:
             # Surface reconstruction (only for ordered 2D surfaces)
             recon_html = ""
             if cls in ("Streaks", "Mixed"):
-                arr = preprocess(img, lab_mode, roi_fraction, skip_top)
+                arr = preprocess(img, used_lab, roi_fraction, skip_top)
                 recon = detect_reconstruction(arr[0])
                 recon_html = (
                     f'<div style="font-size:12px;color:#555;margin-top:8px;">'
