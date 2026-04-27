@@ -93,7 +93,7 @@ def to_gray_stretched(img: Image.Image) -> np.ndarray:
     # Background pixels sit near the median after subtraction;
     # streak pixels are above it → only streaks survive.
     p_lo = np.percentile(gray, 50)
-    p_hi = np.percentile(gray, 99)
+    p_hi = np.percentile(gray, 95)
     if p_hi > p_lo:
         gray = np.clip((gray - p_lo) / (p_hi - p_lo), 0.0, 1.0)
     else:
