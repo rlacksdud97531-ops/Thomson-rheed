@@ -260,6 +260,8 @@ with st.sidebar:
     )
 
     st.divider()
+    show_preview = st.toggle("Show preprocessed image", value=False)
+
     st.markdown("**Zoom** *(Lab 이미지용)*")
     zoom = st.slider(
         "중앙 확대 비율", min_value=0.3, max_value=1.0,
@@ -347,12 +349,17 @@ for f in uploaded:
 
     with st.container(border=True):
         # ── Image columns ──────────────────────────────────────────────────
-        c_orig, c_pre, c_res = st.columns([1, 1, 1.4])
-        with c_orig:
-            st.image(img, caption=f"Original: {f.name}", use_container_width=True)
-        with c_pre:
-            prev = get_preprocessed_preview(img, zoom)
-            st.image(prev, caption="Model input", use_container_width=True)
+        if show_preview:
+            c_orig, c_pre, c_res = st.columns([1, 1, 1.4])
+            with c_orig:
+                st.image(img, caption=f"Original: {f.name}", use_container_width=True)
+            with c_pre:
+                prev = get_preprocessed_preview(img, zoom)
+                st.image(prev, caption="Model input", use_container_width=True)
+        else:
+            c_orig, c_res = st.columns([1, 1.4])
+            with c_orig:
+                st.image(img, caption=f.name, use_container_width=True)
         with c_res:
             # Surface reconstruction (only for ordered 2D surfaces)
             recon_html = ""
