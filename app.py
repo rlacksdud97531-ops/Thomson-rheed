@@ -125,11 +125,16 @@ def crop_roi_by_brightest(gray: np.ndarray,
     start = int(h * skip_top)
     active = gray[start:, :]          # region below gun shadow
 
-    # ── Horizontal: brightest column = streak centre ───────────────────────
+    # ── Horizontal: 밝은 열들의 무게중심 = 패턴 전체 중심 ─────────────────────
     col_brightness = (active * weight_x).mean(axis=0)
     k = max(3, w // 40)
     col_brightness = np.convolve(col_brightness, np.ones(k) / k, mode='same')
-    cx = int(np.argmax(col_brightness))
+    thresh_col = np.percentile(col_brightness, 75)
+    bright_cols = np.where(col_brightness >= thresh_col)[0]
+    if len(bright_cols) > 0:
+        cx = int(np.mean(bright_cols))   # 가장 밝은 점 1개가 아닌 전체 무게중심
+    else:
+        cx = w // 2
 
     # ── Vertical: centroid of the top-25 % brightest rows ─────────────────
     # Streaks live in the brightest rows; their centroid gives the vertical
