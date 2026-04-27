@@ -1,7 +1,7 @@
 """
 RHEED Pattern Classifier — Public Web App
 EfficientNetB2-based 4-class classifier
-(Modulated / Anomalous Spots / Spotty / Streaks)
+(Mixed / Unclear / Spotty / Streaks)
 """
 import os
 import numpy as np
@@ -21,13 +21,13 @@ st.set_page_config(
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Thomson_5.keras")
-CLASS_NAMES  = ["Modulated", "Anomalous Spots", "Spotty", "Streaks"]
+CLASS_NAMES  = ["Mixed", "Unclear", "Spotty", "Streaks"]
 CLASS_COLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12"]
 CLASS_DESC   = {
-    "Modulated":       "Periodic intensity modulation along streaks",
-    "Anomalous Spots": "Irregular bright spots (transmission-like diffraction)",
-    "Spotty":          "Discrete spots indicating 3D island growth",
-    "Streaks":         "Continuous streaks — smooth 2D layer growth",
+    "Mixed":   "Periodic intensity modulation along streaks",
+    "Unclear": "Irregular bright spots (transmission-like diffraction)",
+    "Spotty":  "Discrete spots indicating 3D island growth",
+    "Streaks": "Continuous streaks — smooth 2D layer growth",
 }
 IMG_SIZE = (260, 260)
 
@@ -272,8 +272,8 @@ with st.sidebar:
 **Classes**
 | | Class | Pattern |
 |---|---|---|
-| 🔴 | Modulated | Periodic streak modulation |
-| 🔵 | Anomalous Spots | Irregular transmission spots |
+| 🔴 | Mixed | Periodic streak modulation |
+| 🔵 | Unclear | Irregular transmission spots |
 | 🟢 | Spotty | Discrete 3D island spots |
 | 🟡 | Streaks | Smooth 2D growth streaks |
 
@@ -391,7 +391,7 @@ for f in uploaded:
         with c_res:
             # Surface reconstruction (only for ordered 2D surfaces)
             recon_html = ""
-            if cls in ("Streaks", "Modulated"):
+            if cls in ("Streaks", "Mixed"):
                 arr = preprocess(img, lab_mode, roi_fraction, skip_top)
                 recon = detect_reconstruction(arr[0])
                 recon_html = (
