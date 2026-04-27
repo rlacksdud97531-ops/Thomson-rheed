@@ -47,6 +47,20 @@ def safe_open_rgb(src) -> Image.Image:
     return img
 
 
+def crop_black_top(img: Image.Image, threshold: float = 0.04) -> Image.Image:
+    """위 절반이 어두우면 (평균 밝기 < threshold) 상단 절반 제거.
+
+    RHEED 실험실 이미지에서 전자총 그림자로 인한 검은 상단 영역을 제거.
+    threshold: 0~1 범위, 기본값 0.04 (4% 밝기)
+    """
+    arr = np.array(img.convert("L"), dtype=np.float32) / 255.0
+    h = arr.shape[0]
+    top_brightness = arr[:h // 2].mean()
+    if top_brightness < threshold:
+        return img.crop((0, h // 2, img.width, h))
+    return img
+
+
 def to_gray_stretched(img: Image.Image) -> np.ndarray:
     """Convert lab image to [0,1] grayscale matching training data distribution.
 
@@ -155,11 +169,14 @@ def predict_auto(model, img: Image.Image,
                  roi_fraction: float = 0.55,
                  skip_top: float = 0.25):
     """Normal mode와 Lab mode 단일 예측 후 confidence 높은 쪽 반환.
+    위 절반이 어두우면 자동으로 상단 크롭 적용.
 
     Returns:
         prob      : 선택된 예측 확률 벡터
         used_lab  : Lab mode가 선택됐으면 True
     """
+    img = crop_black_top(img)   # 위 절반 검정이면 자동 제거
+
     arr_normal = preprocess(img, lab_mode=False,
                             roi_fraction=roi_fraction, skip_top=skip_top)
     arr_lab    = preprocess(img, lab_mode=True,
