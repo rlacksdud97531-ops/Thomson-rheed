@@ -105,8 +105,10 @@ def to_gray_stretched(img: Image.Image) -> np.ndarray:
 
 def crop_roi_by_brightest(gray: np.ndarray,
                           roi_fraction: float = 0.55,
-                          skip_top: float = 0.25) -> np.ndarray:
-    """Square-crop capturing the full streak length in the RHEED pattern.
+                          skip_top: float = 0.25,
+                          roi_w_fraction: float = 0.80,
+                          roi_h_fraction: float = 0.42) -> np.ndarray:
+    """Rectangle-crop capturing the RHEED pattern (wide & short to cut Laue circles).
 
     X (horizontal): brightness-weighted centroid of columns below the gun area,
                     with a Gaussian centre-bias to ignore the phosphor screen rim.
@@ -148,10 +150,11 @@ def crop_roi_by_brightest(gray: np.ndarray,
     else:
         cy = h // 2
 
-    # ── Crop ──────────────────────────────────────────────────────────────────
-    half = int(min(h, w) * roi_fraction / 2)
-    y0 = max(0, cy - half);  y1 = min(h, cy + half)
-    x0 = max(0, cx - half);  x1 = min(w, cx + half)
+    # ── Crop (직사각형: 가로 넓게, 세로 짧게) ─────────────────────────────────
+    half_x = int(w * roi_w_fraction / 2)   # 가로 = 이미지 너비의 80%
+    half_y = int(h * roi_h_fraction / 2)   # 세로 = 이미지 높이의 42%
+    y0 = max(0, cy - half_y);  y1 = min(h, cy + half_y)
+    x0 = max(0, cx - half_x);  x1 = min(w, cx + half_x)
     return gray[y0:y1, x0:x1]
 
 
