@@ -52,24 +52,27 @@ def to_gray_stretched(img: Image.Image) -> np.ndarray:
 
     Steps:
       1. Max-channel grayscale (captures green phosphor regardless of hue).
-      2. Flat-field correction: divide by large-Gaussian blur → removes circular
-         vignette gradient and equalises local illumination.
+      2. Background subtraction: gray - 0.85 × GaussianBlur(gray)
+         → removes circular vignette while preserving streak intensity gradient.
+         (Division was replaced with subtraction to avoid halo/diamond artefacts
+          where streak tops appeared as isolated bright lozenges.)
       3. Percentile (p2–p98) contrast stretch → maps active range to [0, 1].
     """
     arr  = np.array(img.convert("RGB")).astype(np.float32)
     gray = np.max(arr, axis=2)                        # (H, W) max-channel
 
-    # ── Flat-field correction ──────────────────────────────────────────────
-    # Large Gaussian blur estimates the slowly-varying background (vignette).
-    # Dividing removes it, leaving only the local streak contrast.
+    # ── Background subtraction ─────────────────────────────────────────────
+    # Large Gaussian blur estimates the slowly-varying vignette background.
+    # Subtracting 85 % of it removes the circular gradient while keeping the
+    # relative brightness variation along each streak (top bright → bottom dim),
+    # which is what the model learned to recognise as a streak.
     radius = max(40, min(gray.shape) // 4)
     gray_u8 = np.clip(gray, 0, 255).astype(np.uint8)
     bg = np.array(
         Image.fromarray(gray_u8).filter(ImageFilter.GaussianBlur(radius=radius)),
         dtype=np.float32,
     )
-    bg   = np.maximum(bg, 1.0)                        # avoid division by zero
-    gray = np.clip(gray / bg, 0.0, None)              # background-normalised
+    gray = np.clip(gray - bg * 0.85, 0.0, None)      # subtract background trend
 
     # ── Percentile stretch ─────────────────────────────────────────────────
     p_lo = np.percentile(gray, 2)
