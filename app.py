@@ -392,6 +392,7 @@ for f in uploaded:
             # Surface reconstruction (only for ordered 2D surfaces)
             recon_html = ""
             if cls in ("Streaks", "Modulated"):
+                arr = preprocess(img, lab_mode, roi_fraction, skip_top)
                 recon = detect_reconstruction(arr[0])
                 recon_html = (
                     f'<div style="font-size:12px;color:#555;margin-top:8px;">'
