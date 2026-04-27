@@ -102,22 +102,32 @@ def crop_roi_by_brightest(gray: np.ndarray,
     """
     h, w = gray.shape
 
-    # ── Horizontal: find the centre of the streak columns ─────────────────────
+    # Gaussian centre-bias weight (horizontal) — suppresses phosphor rim
     sigma_x = w * 0.35
     weight_x = np.exp(
         -((np.arange(w, dtype=np.float32) - w / 2) ** 2) / (2 * sigma_x ** 2)
-    )  # (W,) — down-weights phosphor rim
+    )  # (W,)
 
     start = int(h * skip_top)
-    col_brightness = (gray[start:, :] * weight_x).mean(axis=0)   # (W,)
+    active = gray[start:, :]          # region below gun shadow
 
-    # Smooth to avoid locking onto a single bright pixel
+    # ── Horizontal: brightest column = streak centre ───────────────────────
+    col_brightness = (active * weight_x).mean(axis=0)
     k = max(3, w // 40)
     col_brightness = np.convolve(col_brightness, np.ones(k) / k, mode='same')
     cx = int(np.argmax(col_brightness))
 
-    # ── Vertical: always image centre (captures full streak, not just bright top)
-    cy = h // 2
+    # ── Vertical: centroid of the top-25 % brightest rows ─────────────────
+    # Streaks live in the brightest rows; their centroid gives the vertical
+    # centre of the actual pattern (not the fixed image centre which often
+    # pulls the crop into the bright phosphor background below the streaks).
+    row_brightness = (active * weight_x).mean(axis=1)
+    thresh_row = np.percentile(row_brightness, 75)
+    bright_rows = np.where(row_brightness >= thresh_row)[0]
+    if len(bright_rows) > 0:
+        cy = int(np.mean(bright_rows)) + start
+    else:
+        cy = h // 2
 
     # ── Crop ──────────────────────────────────────────────────────────────────
     half = int(min(h, w) * roi_fraction / 2)
