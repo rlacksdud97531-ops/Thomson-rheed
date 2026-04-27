@@ -166,15 +166,35 @@ def predict_tta(model, img: Image.Image,
 
     variants = [
         base,
-        ImageOps.mirror(base),          # 좌우 flip
-        ImageOps.flip(base),            # 상하 flip
-        ImageOps.mirror(ImageOps.flip(base)),  # 180° 회전
+        ImageOps.mirror(base),
+        ImageOps.flip(base),
+        ImageOps.mirror(ImageOps.flip(base)),
     ]
     probs = []
     for v in variants:
         arr = (np.array(v.resize(IMG_SIZE), dtype=np.float32) / 255.0)[np.newaxis]
         probs.append(model.predict(arr, verbose=0)[0])
     return np.mean(probs, axis=0)
+
+
+def predict_auto(model, img: Image.Image,
+                 roi_fraction: float = 0.55,
+                 skip_top: float = 0.25):
+    """Normal mode와 Lab mode 둘 다 예측 후 confidence 높은 쪽 반환.
+
+    Returns:
+        prob      : 선택된 예측 확률 벡터
+        used_lab  : Lab mode가 선택됐으면 True
+    """
+    prob_normal = predict_tta(model, img, lab_mode=False,
+                              roi_fraction=roi_fraction, skip_top=skip_top)
+    prob_lab    = predict_tta(model, img, lab_mode=True,
+                              roi_fraction=roi_fraction, skip_top=skip_top)
+
+    if prob_normal.max() >= prob_lab.max():
+        return prob_normal, False
+    else:
+        return prob_lab, True
 
 
 def get_preprocessed_preview(img: Image.Image,
@@ -336,7 +356,7 @@ if len(uploaded) > 1:
     for f in uploaded:
         try:
             img  = safe_open_rgb(f)
-            prob = predict_tta(model, img, lab_mode, roi_fraction, skip_top)
+            prob, _ = predict_auto(model, img, roi_fraction, skip_top)
             top  = int(np.argmax(prob))
             rows.append({
                 "File": f.name,
@@ -368,7 +388,7 @@ for f in uploaded:
         st.error(f"`{f.name}` could not be opened: {ex}")
         continue
 
-    prob = predict_tta(model, img, lab_mode, roi_fraction, skip_top)
+    prob, used_lab = predict_auto(model, img, roi_fraction, skip_top)
     top  = int(np.argmax(prob))
     cls  = CLASS_NAMES[top]
     conf = float(prob[top])
@@ -376,7 +396,7 @@ for f in uploaded:
 
     with st.container(border=True):
         # ── Image columns ──────────────────────────────────────────────────
-        if lab_mode and show_preview:
+        if used_lab:
             c_orig, c_pre, c_res = st.columns([1, 1, 1.4])
             with c_orig:
                 st.image(img, caption=f"Original: {f.name}", use_container_width=True)
