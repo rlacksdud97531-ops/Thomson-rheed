@@ -48,17 +48,21 @@ def safe_open_rgb(src) -> Image.Image:
 
 
 def crop_black_top(img: Image.Image, threshold: float = 0.04) -> Image.Image:
-    """위 절반이 어두우면 (평균 밝기 < threshold) 상단 절반 제거.
+    """검은 상단 영역을 실제 밝기가 시작되는 행부터 잘라냄.
 
-    RHEED 실험실 이미지에서 전자총 그림자로 인한 검은 상단 영역을 제거.
-    threshold: 0~1 범위, 기본값 0.04 (4% 밝기)
+    고정 h//2 대신 행별 평균 밝기가 threshold를 처음 넘는 행을 찾아 크롭.
+    검은 영역이 없으면 원본 반환.
     """
     arr = np.array(img.convert("L"), dtype=np.float32) / 255.0
     h = arr.shape[0]
-    top_brightness = arr[:h // 2].mean()
-    if top_brightness < threshold:
-        return img.crop((0, h // 2, img.width, h))
-    return img
+    row_means = arr.mean(axis=1)           # 각 행의 평균 밝기
+    bright_rows = np.where(row_means > threshold)[0]
+    if len(bright_rows) == 0:
+        return img                         # 전체가 어두우면 그대로
+    start_row = int(bright_rows[0])
+    if start_row < h * 0.05:              # 검은 영역이 5% 미만이면 자르지 않음
+        return img
+    return img.crop((0, start_row, img.width, h))
 
 
 def to_gray_stretched(img: Image.Image) -> np.ndarray:
@@ -86,7 +90,7 @@ def to_gray_stretched(img: Image.Image) -> np.ndarray:
         Image.fromarray(gray_u8).filter(ImageFilter.GaussianBlur(radius=radius)),
         dtype=np.float32,
     )
-    gray = np.clip(gray - bg * 0.92, 0.0, None)      # subtract background trend
+    gray = np.clip(gray - bg * 0.97, 0.0, None)      # subtract background trend
 
     # ── Percentile stretch ─────────────────────────────────────────────────
     # p_lo = p50: median and below → 0 (black background).
