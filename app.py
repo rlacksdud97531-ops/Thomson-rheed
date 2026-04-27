@@ -7,7 +7,7 @@ import os
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image
 import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
@@ -23,16 +23,10 @@ st.set_page_config(
 MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Thomson_5.keras")
 CLASS_NAMES  = ["Mixed", "Unclear", "Spotty", "Streaks"]
 CLASS_COLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12"]
-CLASS_DESC   = {
-    "Mixed":   "Periodic intensity modulation along streaks",
-    "Unclear": "Irregular bright spots (transmission-like diffraction)",
-    "Spotty":  "Discrete spots indicating 3D island growth",
-    "Streaks": "Continuous streaks — smooth 2D layer growth",
-}
-IMG_SIZE = (260, 260)
+IMG_SIZE     = (260, 260)
 
 
-# ── Image preprocessing ────────────────────────────────────────────────────────
+# ── Image loading ──────────────────────────────────────────────────────────────
 def safe_open_rgb(src) -> Image.Image:
     """Open any RHEED image (8-bit / 16-bit grayscale / RGB) as RGB."""
     img = Image.open(src)
@@ -47,123 +41,11 @@ def safe_open_rgb(src) -> Image.Image:
     return img
 
 
-def crop_black_top(img: Image.Image, threshold: float = 0.04) -> Image.Image:
-    """검은 상단 영역을 실제 밝기가 시작되는 행부터 잘라냄.
-
-    고정 h//2 대신 행별 평균 밝기가 threshold를 처음 넘는 행을 찾아 크롭.
-    검은 영역이 없으면 원본 반환.
-    """
-    arr = np.array(img.convert("L"), dtype=np.float32) / 255.0
-    h = arr.shape[0]
-    row_means = arr.mean(axis=1)           # 각 행의 평균 밝기
-    bright_rows = np.where(row_means > threshold)[0]
-    if len(bright_rows) == 0:
-        return img                         # 전체가 어두우면 그대로
-    start_row = int(bright_rows[0])
-    if start_row < h * 0.05:              # 검은 영역이 5% 미만이면 자르지 않음
-        return img
-    return img.crop((0, start_row, img.width, h))
-
-
-def to_gray_stretched(img: Image.Image) -> np.ndarray:
-    """Convert lab image to [0,1] grayscale matching training data distribution.
-
-    Steps:
-      1. Max-channel grayscale (captures green phosphor regardless of hue).
-      2. Background subtraction: gray - 0.85 × GaussianBlur(gray)
-         → removes circular vignette while preserving streak intensity gradient.
-         (Division was replaced with subtraction to avoid halo/diamond artefacts
-          where streak tops appeared as isolated bright lozenges.)
-      3. Percentile (p2–p98) contrast stretch → maps active range to [0, 1].
-    """
-    arr  = np.array(img.convert("RGB")).astype(np.float32)
-    gray = np.max(arr, axis=2)                        # (H, W) max-channel
-
-    # ── Background subtraction ─────────────────────────────────────────────
-    # Large Gaussian blur estimates the slowly-varying vignette background.
-    # Subtracting 85 % of it removes the circular gradient while keeping the
-    # relative brightness variation along each streak (top bright → bottom dim),
-    # which is what the model learned to recognise as a streak.
-    radius = max(40, min(gray.shape) // 4)
-    gray_u8 = np.clip(gray, 0, 255).astype(np.uint8)
-    bg = np.array(
-        Image.fromarray(gray_u8).filter(ImageFilter.GaussianBlur(radius=radius)),
-        dtype=np.float32,
-    )
-    gray = np.clip(gray - bg * 0.97, 0.0, None)      # subtract background trend
-
-    # ── Percentile stretch ─────────────────────────────────────────────────
-    # p_lo = p50: median and below → 0 (black background).
-    # Background pixels sit near the median after subtraction;
-    # streak pixels are above it → only streaks survive.
-    p_lo = np.percentile(gray, 50)
-    p_hi = np.percentile(gray, 95)
-    if p_hi > p_lo:
-        gray = np.clip((gray - p_lo) / (p_hi - p_lo), 0.0, 1.0)
-    else:
-        mx   = gray.max()
-        gray = (gray / mx) if mx > 0 else gray
-
-    return gray.astype(np.float32)                    # (H, W), [0, 1]
-
-
-def center_crop(gray: np.ndarray, zoom: float = 0.85) -> np.ndarray:
-    """중앙 기준으로 zoom 비율만큼 크롭 (확대 효과).
-
-    zoom=0.85 → 이미지 중앙 85% 영역만 사용.
-    """
-    h, w = gray.shape
-    half_h = int(h * zoom / 2)
-    half_w = int(w * zoom / 2)
-    cy, cx = h // 2, w // 2
-    y0 = max(0, cy - half_h);  y1 = min(h, cy + half_h)
-    x0 = max(0, cx - half_w);  x1 = min(w, cx + half_w)
-    return gray[y0:y1, x0:x1]
-
-
-def preprocess(img: Image.Image,
-               lab_mode: bool = False,
-               zoom: float = 0.85) -> np.ndarray:
-    """Prepare image for model input → (1, 260, 260, 3) float32."""
-    if lab_mode:
-        gray = to_gray_stretched(img)
-        gray = center_crop(gray, zoom)
-        gray8 = (gray * 255).astype(np.uint8)
-        rgb   = np.stack([gray8, gray8, gray8], axis=-1)
-        img   = Image.fromarray(rgb)
+# ── Preprocessing ──────────────────────────────────────────────────────────────
+def preprocess(img: Image.Image) -> np.ndarray:
+    """Resize and normalize → (1, 260, 260, 3) float32."""
     img = img.resize(IMG_SIZE)
     return (np.array(img, dtype=np.float32) / 255.0)[np.newaxis]
-
-
-def predict_auto(model, img: Image.Image, zoom: float = 0.85):
-    """Normal mode와 Lab mode 단일 예측 후 confidence 높은 쪽 반환.
-    위 절반이 어두우면 자동으로 상단 크롭 적용.
-
-    Returns:
-        prob      : 선택된 예측 확률 벡터
-        used_lab  : Lab mode가 선택됐으면 True
-    """
-    img = crop_black_top(img)
-
-    arr_normal = preprocess(img, lab_mode=False)
-    arr_lab    = preprocess(img, lab_mode=True, zoom=zoom)
-
-    prob_normal = model.predict(arr_normal, verbose=0)[0]
-    prob_lab    = model.predict(arr_lab,    verbose=0)[0]
-
-    if prob_normal.max() >= prob_lab.max():
-        return prob_normal, False
-    else:
-        return prob_lab, True
-
-
-def get_preprocessed_preview(img: Image.Image, zoom: float = 0.85) -> Image.Image:
-    """Return the grayscale center-crop that the model sees (before resize)."""
-    gray  = to_gray_stretched(img)
-    gray  = center_crop(gray, zoom)
-    gray8 = (gray * 255).astype(np.uint8)
-    rgb   = np.stack([gray8, gray8, gray8], axis=-1)
-    return Image.fromarray(rgb)
 
 
 # ── Model loading ──────────────────────────────────────────────────────────────
@@ -172,57 +54,6 @@ def load_model():
     if not os.path.exists(MODEL_PATH):
         return None
     return keras.models.load_model(MODEL_PATH)
-
-
-# ── Surface reconstruction from streak spacing ────────────────────────────────
-def detect_reconstruction(model_input: np.ndarray) -> str:
-    """Estimate surface reconstruction from horizontal streak spacing.
-    model_input: (260, 260, 3) float32 — the array the model already received.
-    Returns e.g. '1×1', '2×1', '√2×√2 R45°', or '—'.
-    """
-    gray = model_input.mean(axis=2)          # (H, W)
-    h, w = gray.shape
-
-    # Horizontal profile: mean over middle rows (skip gun shadow & bottom noise)
-    r0, r1 = int(h * 0.25), int(h * 0.70)
-    profile = gray[r0:r1].mean(axis=0)       # (W,)
-
-    # Smooth with ~3 % of width
-    k = max(3, w // 35)
-    profile = np.convolve(profile, np.ones(k) / k, mode='same')
-
-    pmax = profile.max()
-    if pmax < 0.03:
-        return "—"
-    profile /= pmax
-
-    # Local maxima above 15 % of peak
-    peaks = [i for i in range(1, w - 1)
-             if profile[i] > profile[i - 1]
-             and profile[i] > profile[i + 1]
-             and profile[i] > 0.15]
-
-    if len(peaks) < 2:
-        return "—"
-
-    peaks.sort()
-    gaps = [peaks[j + 1] - peaks[j] for j in range(len(peaks) - 1)]
-    d_max = max(gaps)
-    d_min = min(gaps)
-
-    if d_max == 0:
-        return "—"
-
-    ratio = d_min / d_max
-
-    if ratio > 0.82:      # evenly spaced → bulk periodicity
-        return "1×1"
-    elif ratio > 0.60:    # ≈ 1/√2 ≈ 0.707
-        return "√2×√2 R45°"
-    elif ratio > 0.35:    # ≈ 1/2 = 0.50
-        return "2×1"
-    else:
-        return "—"
 
 
 # ── Probability bar chart ──────────────────────────────────────────────────────
@@ -258,17 +89,6 @@ with st.sidebar:
 ---
 """
     )
-
-    st.divider()
-    show_preview = st.toggle("Show preprocessed image", value=False)
-
-    st.markdown("**Zoom** *(Lab 이미지용)*")
-    zoom = st.slider(
-        "중앙 확대 비율", min_value=0.3, max_value=1.0,
-        value=0.85, step=0.05,
-        help="1.0 = 원본, 0.85 = 중앙 85% 확대")
-
-    st.divider()
     st.caption(f"Model: Thomson_5 · TF {tf.__version__}")
     st.caption("© 2026 rlack")
 
@@ -277,13 +97,6 @@ with st.sidebar:
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 st.header("Upload RHEED Image(s)")
-# Hide Streamlit's auto-generated "50MB per file • …" helper text
-st.markdown(
-    "<style>small.st-emotion-cache-1b2d9b5, "
-    "[data-testid='stFileUploaderDropzoneInstructions'] small { display:none !important; }"
-    "</style>",
-    unsafe_allow_html=True,
-)
 
 model = load_model()
 if model is None:
@@ -309,7 +122,8 @@ if len(uploaded) > 1:
     for f in uploaded:
         try:
             img  = safe_open_rgb(f)
-            prob, _ = predict_auto(model, img, zoom)
+            arr  = preprocess(img)
+            prob = model.predict(arr, verbose=0)[0]
             top  = int(np.argmax(prob))
             rows.append({
                 "File": f.name,
@@ -341,36 +155,18 @@ for f in uploaded:
         st.error(f"`{f.name}` could not be opened: {ex}")
         continue
 
-    prob, used_lab = predict_auto(model, img, zoom)
+    arr  = preprocess(img)
+    prob = model.predict(arr, verbose=0)[0]
     top  = int(np.argmax(prob))
     cls  = CLASS_NAMES[top]
     conf = float(prob[top])
     col  = CLASS_COLORS[top]
 
     with st.container(border=True):
-        # ── Image columns ──────────────────────────────────────────────────
-        if show_preview:
-            c_orig, c_pre, c_res = st.columns([1, 1, 1.4])
-            with c_orig:
-                st.image(img, caption=f"Original: {f.name}", use_container_width=True)
-            with c_pre:
-                prev = get_preprocessed_preview(img, zoom)
-                st.image(prev, caption="Model input", use_container_width=True)
-        else:
-            c_orig, c_res = st.columns([1, 1.4])
-            with c_orig:
-                st.image(img, caption=f.name, use_container_width=True)
+        c_orig, c_res = st.columns([1, 1.4])
+        with c_orig:
+            st.image(img, caption=f.name, use_container_width=True)
         with c_res:
-            # Surface reconstruction (only for ordered 2D surfaces)
-            recon_html = ""
-            if cls in ("Streaks", "Mixed"):
-                arr = preprocess(img, used_lab, zoom)
-                recon = detect_reconstruction(arr[0])
-                recon_html = (
-                    f'<div style="font-size:12px;color:#555;margin-top:8px;">'
-                    f'<b>Surface reconstruction:</b> {recon}</div>'
-                )
-
             st.markdown(
                 f"""
                 <div style="padding:14px;border-radius:8px;
@@ -385,7 +181,6 @@ for f in uploaded:
                     <div style="font-size:13px;color:#555;margin-top:2px;">
                         Confidence: <b>{conf*100:.1f}%</b>
                     </div>
-                    {recon_html}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -393,4 +188,3 @@ for f in uploaded:
             fig = plot_probs(prob)
             st.pyplot(fig)
             plt.close(fig)
-
