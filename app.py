@@ -151,45 +151,22 @@ def preprocess(img: Image.Image,
     return (np.array(img, dtype=np.float32) / 255.0)[np.newaxis]
 
 
-def predict_tta(model, img: Image.Image,
-                lab_mode: bool = False,
-                roi_fraction: float = 0.55,
-                skip_top: float = 0.25) -> np.ndarray:
-    """Test Time Augmentation: 4방향 flip 예측 평균 → 더 안정적인 확률값."""
-    if lab_mode:
-        gray = to_gray_stretched(img)
-        gray = crop_roi_by_brightest(gray, roi_fraction, skip_top)
-        gray8 = (gray * 255).astype(np.uint8)
-        base  = Image.fromarray(np.stack([gray8, gray8, gray8], axis=-1))
-    else:
-        base = img
-
-    variants = [
-        base,
-        ImageOps.mirror(base),
-        ImageOps.flip(base),
-        ImageOps.mirror(ImageOps.flip(base)),
-    ]
-    probs = []
-    for v in variants:
-        arr = (np.array(v.resize(IMG_SIZE), dtype=np.float32) / 255.0)[np.newaxis]
-        probs.append(model.predict(arr, verbose=0)[0])
-    return np.mean(probs, axis=0)
-
-
 def predict_auto(model, img: Image.Image,
                  roi_fraction: float = 0.55,
                  skip_top: float = 0.25):
-    """Normal mode와 Lab mode 둘 다 예측 후 confidence 높은 쪽 반환.
+    """Normal mode와 Lab mode 단일 예측 후 confidence 높은 쪽 반환.
 
     Returns:
         prob      : 선택된 예측 확률 벡터
         used_lab  : Lab mode가 선택됐으면 True
     """
-    prob_normal = predict_tta(model, img, lab_mode=False,
-                              roi_fraction=roi_fraction, skip_top=skip_top)
-    prob_lab    = predict_tta(model, img, lab_mode=True,
-                              roi_fraction=roi_fraction, skip_top=skip_top)
+    arr_normal = preprocess(img, lab_mode=False,
+                            roi_fraction=roi_fraction, skip_top=skip_top)
+    arr_lab    = preprocess(img, lab_mode=True,
+                            roi_fraction=roi_fraction, skip_top=skip_top)
+
+    prob_normal = model.predict(arr_normal, verbose=0)[0]
+    prob_lab    = model.predict(arr_lab,    verbose=0)[0]
 
     if prob_normal.max() >= prob_lab.max():
         return prob_normal, False
