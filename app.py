@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Thomson_6.keras")
+MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Thomson_5.keras")
 CLASS_NAMES  = ["Modulated", "Anomalous Spots", "Spotty", "Streaks"]
 CLASS_COLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12"]
 CLASS_DESC   = {
