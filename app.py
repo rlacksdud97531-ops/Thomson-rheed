@@ -347,18 +347,12 @@ for f in uploaded:
 
     with st.container(border=True):
         # ── Image columns ──────────────────────────────────────────────────
-        if used_lab:
-            c_orig, c_pre, c_res = st.columns([1, 1, 1.4])
-            with c_orig:
-                st.image(img, caption=f"Original: {f.name}", use_container_width=True)
-            with c_pre:
-                prev = get_preprocessed_preview(img, zoom)
-                st.image(prev, caption="Model input (ROI)", use_container_width=True)
-        else:
-            c_img, c_res = st.columns([1, 1.4])
-            with c_img:
-                st.image(img, caption=f.name, use_container_width=True)
-
+        c_orig, c_pre, c_res = st.columns([1, 1, 1.4])
+        with c_orig:
+            st.image(img, caption=f"Original: {f.name}", use_container_width=True)
+        with c_pre:
+            prev = get_preprocessed_preview(img, zoom)
+            st.image(prev, caption="Model input", use_container_width=True)
         with c_res:
             # Surface reconstruction (only for ordered 2D surfaces)
             recon_html = ""
