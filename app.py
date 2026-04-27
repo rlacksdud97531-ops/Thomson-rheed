@@ -75,18 +75,16 @@ def to_gray_stretched(img: Image.Image) -> np.ndarray:
     gray = np.clip(gray - bg * 0.92, 0.0, None)      # subtract background trend
 
     # ── Percentile stretch ─────────────────────────────────────────────────
-    p_lo = np.percentile(gray, 2)
-    p_hi = np.percentile(gray, 98)
+    # p_lo = p50: median and below → 0 (black background).
+    # Background pixels sit near the median after subtraction;
+    # streak pixels are above it → only streaks survive.
+    p_lo = np.percentile(gray, 50)
+    p_hi = np.percentile(gray, 99)
     if p_hi > p_lo:
         gray = np.clip((gray - p_lo) / (p_hi - p_lo), 0.0, 1.0)
     else:
         mx   = gray.max()
         gray = (gray / mx) if mx > 0 else gray
-
-    # ── Gamma correction ───────────────────────────────────────────────────
-    # γ > 1 suppresses residual background (dark pixels → darker) while
-    # keeping streak peaks close to 1.0, matching training data contrast.
-    gray = np.power(gray, 1.5)
 
     return gray.astype(np.float32)                    # (H, W), [0, 1]
 
