@@ -161,11 +161,14 @@ def crop_roi_by_brightest(gray: np.ndarray,
 def preprocess(img: Image.Image,
                lab_mode: bool = False,
                roi_fraction: float = 0.55,
-               skip_top: float = 0.25) -> np.ndarray:
+               skip_top: float = 0.25,
+               roi_w_fraction: float = 0.80,
+               roi_h_fraction: float = 0.25) -> np.ndarray:
     """Prepare image for model input → (1, 260, 260, 3) float32."""
     if lab_mode:
         gray = to_gray_stretched(img)
-        gray = crop_roi_by_brightest(gray, roi_fraction, skip_top)
+        gray = crop_roi_by_brightest(gray, roi_fraction, skip_top,
+                                     roi_w_fraction, roi_h_fraction)
         gray8 = (gray * 255).astype(np.uint8)
         rgb   = np.stack([gray8, gray8, gray8], axis=-1)
         img   = Image.fromarray(rgb)
@@ -175,7 +178,9 @@ def preprocess(img: Image.Image,
 
 def predict_auto(model, img: Image.Image,
                  roi_fraction: float = 0.55,
-                 skip_top: float = 0.25):
+                 skip_top: float = 0.25,
+                 roi_w_fraction: float = 0.80,
+                 roi_h_fraction: float = 0.25):
     """Normal mode와 Lab mode 단일 예측 후 confidence 높은 쪽 반환.
     위 절반이 어두우면 자동으로 상단 크롭 적용.
 
@@ -188,7 +193,9 @@ def predict_auto(model, img: Image.Image,
     arr_normal = preprocess(img, lab_mode=False,
                             roi_fraction=roi_fraction, skip_top=skip_top)
     arr_lab    = preprocess(img, lab_mode=True,
-                            roi_fraction=roi_fraction, skip_top=skip_top)
+                            roi_fraction=roi_fraction, skip_top=skip_top,
+                            roi_w_fraction=roi_w_fraction,
+                            roi_h_fraction=roi_h_fraction)
 
     prob_normal = model.predict(arr_normal, verbose=0)[0]
     prob_lab    = model.predict(arr_lab,    verbose=0)[0]
@@ -201,10 +208,13 @@ def predict_auto(model, img: Image.Image,
 
 def get_preprocessed_preview(img: Image.Image,
                               roi_fraction: float = 0.55,
-                              skip_top: float = 0.25) -> Image.Image:
+                              skip_top: float = 0.25,
+                              roi_w_fraction: float = 0.80,
+                              roi_h_fraction: float = 0.25) -> Image.Image:
     """Return the grayscale ROI crop that the model actually sees (before resize)."""
     gray  = to_gray_stretched(img)
-    gray  = crop_roi_by_brightest(gray, roi_fraction, skip_top)
+    gray  = crop_roi_by_brightest(gray, roi_fraction, skip_top,
+                                  roi_w_fraction, roi_h_fraction)
     gray8 = (gray * 255).astype(np.uint8)
     rgb   = np.stack([gray8, gray8, gray8], axis=-1)
     return Image.fromarray(rgb)
@@ -307,6 +317,21 @@ with st.sidebar:
     roi_fraction = 0.55
 
     st.divider()
+    st.markdown("**ROI 조정** *(Lab 이미지용)*")
+    roi_w_fraction = st.slider(
+        "가로 범위", min_value=0.3, max_value=1.0,
+        value=0.80, step=0.05,
+        help="ROI 가로 = 이미지 너비의 N%")
+    roi_h_fraction = st.slider(
+        "세로 범위", min_value=0.1, max_value=0.6,
+        value=0.25, step=0.05,
+        help="ROI 세로 = 이미지 높이의 N%")
+    skip_top = st.slider(
+        "상단 제외", min_value=0.0, max_value=0.5,
+        value=0.25, step=0.05,
+        help="전자총 그림자 영역 제외 비율")
+
+    st.divider()
     st.caption(f"Model: Thomson_5 · TF {tf.__version__}")
     st.caption("© 2026 rlack")
 
@@ -347,7 +372,7 @@ if len(uploaded) > 1:
     for f in uploaded:
         try:
             img  = safe_open_rgb(f)
-            prob, _ = predict_auto(model, img, roi_fraction, skip_top)
+            prob, _ = predict_auto(model, img, roi_fraction, skip_top, roi_w_fraction, roi_h_fraction)
             top  = int(np.argmax(prob))
             rows.append({
                 "File": f.name,
@@ -379,7 +404,7 @@ for f in uploaded:
         st.error(f"`{f.name}` could not be opened: {ex}")
         continue
 
-    prob, used_lab = predict_auto(model, img, roi_fraction, skip_top)
+    prob, used_lab = predict_auto(model, img, roi_fraction, skip_top, roi_w_fraction, roi_h_fraction)
     top  = int(np.argmax(prob))
     cls  = CLASS_NAMES[top]
     conf = float(prob[top])
@@ -392,7 +417,7 @@ for f in uploaded:
             with c_orig:
                 st.image(img, caption=f"Original: {f.name}", use_container_width=True)
             with c_pre:
-                prev = get_preprocessed_preview(img, roi_fraction, skip_top)
+                prev = get_preprocessed_preview(img, roi_fraction, skip_top, roi_w_fraction, roi_h_fraction)
                 st.image(prev, caption="Model input (ROI)", use_container_width=True)
         else:
             c_img, c_res = st.columns([1, 1.4])
