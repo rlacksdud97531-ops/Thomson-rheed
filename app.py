@@ -103,72 +103,27 @@ def to_gray_stretched(img: Image.Image) -> np.ndarray:
     return gray.astype(np.float32)                    # (H, W), [0, 1]
 
 
-def crop_roi_by_brightest(gray: np.ndarray,
-                          roi_fraction: float = 0.55,
-                          skip_top: float = 0.25,
-                          roi_w_fraction: float = 0.80,
-                          roi_h_fraction: float = 0.25) -> np.ndarray:
-    """Rectangle-crop capturing the RHEED pattern (wide & short to cut Laue circles).
+def center_crop(gray: np.ndarray, zoom: float = 0.85) -> np.ndarray:
+    """중앙 기준으로 zoom 비율만큼 크롭 (확대 효과).
 
-    X (horizontal): brightness-weighted centroid of columns below the gun area,
-                    with a Gaussian centre-bias to ignore the phosphor screen rim.
-    Y (vertical):   fixed at the image centre — RHEED streaks always span the
-                    centre of the circular screen, so anchoring on the brightest
-                    row (streak top) is avoided; the full streak length is captured.
+    zoom=0.85 → 이미지 중앙 85% 영역만 사용.
     """
     h, w = gray.shape
-
-    # Gaussian centre-bias weight (horizontal) — suppresses phosphor rim
-    sigma_x = w * 0.35
-    weight_x = np.exp(
-        -((np.arange(w, dtype=np.float32) - w / 2) ** 2) / (2 * sigma_x ** 2)
-    )  # (W,)
-
-    start = int(h * skip_top)
-    active = gray[start:, :]          # region below gun shadow
-
-    # ── Horizontal: 밝은 열들의 무게중심 = 패턴 전체 중심 ─────────────────────
-    col_brightness = (active * weight_x).mean(axis=0)
-    k = max(3, w // 40)
-    col_brightness = np.convolve(col_brightness, np.ones(k) / k, mode='same')
-    thresh_col = np.percentile(col_brightness, 75)
-    bright_cols = np.where(col_brightness >= thresh_col)[0]
-    if len(bright_cols) > 0:
-        cx = int(np.mean(bright_cols))   # 가장 밝은 점 1개가 아닌 전체 무게중심
-    else:
-        cx = w // 2
-
-    # ── Vertical: centroid of the top-25 % brightest rows ─────────────────
-    # Streaks live in the brightest rows; their centroid gives the vertical
-    # centre of the actual pattern (not the fixed image centre which often
-    # pulls the crop into the bright phosphor background below the streaks).
-    row_brightness = (active * weight_x).mean(axis=1)
-    thresh_row = np.percentile(row_brightness, 75)
-    bright_rows = np.where(row_brightness >= thresh_row)[0]
-    if len(bright_rows) > 0:
-        cy = int(np.mean(bright_rows)) + start
-    else:
-        cy = h // 2
-
-    # ── Crop (직사각형: 가로 넓게, 세로 짧게) ─────────────────────────────────
-    half_x = int(w * roi_w_fraction / 2)   # 가로 = 이미지 너비의 80%
-    half_y = int(h * roi_h_fraction / 2)   # 세로 = 이미지 높이의 42%
-    y0 = max(0, cy - half_y);  y1 = min(h, cy + half_y)
-    x0 = max(0, cx - half_x);  x1 = min(w, cx + half_x)
+    half_h = int(h * zoom / 2)
+    half_w = int(w * zoom / 2)
+    cy, cx = h // 2, w // 2
+    y0 = max(0, cy - half_h);  y1 = min(h, cy + half_h)
+    x0 = max(0, cx - half_w);  x1 = min(w, cx + half_w)
     return gray[y0:y1, x0:x1]
 
 
 def preprocess(img: Image.Image,
                lab_mode: bool = False,
-               roi_fraction: float = 0.55,
-               skip_top: float = 0.25,
-               roi_w_fraction: float = 0.80,
-               roi_h_fraction: float = 0.25) -> np.ndarray:
+               zoom: float = 0.85) -> np.ndarray:
     """Prepare image for model input → (1, 260, 260, 3) float32."""
     if lab_mode:
         gray = to_gray_stretched(img)
-        gray = crop_roi_by_brightest(gray, roi_fraction, skip_top,
-                                     roi_w_fraction, roi_h_fraction)
+        gray = center_crop(gray, zoom)
         gray8 = (gray * 255).astype(np.uint8)
         rgb   = np.stack([gray8, gray8, gray8], axis=-1)
         img   = Image.fromarray(rgb)
@@ -176,11 +131,7 @@ def preprocess(img: Image.Image,
     return (np.array(img, dtype=np.float32) / 255.0)[np.newaxis]
 
 
-def predict_auto(model, img: Image.Image,
-                 roi_fraction: float = 0.55,
-                 skip_top: float = 0.25,
-                 roi_w_fraction: float = 0.80,
-                 roi_h_fraction: float = 0.25):
+def predict_auto(model, img: Image.Image, zoom: float = 0.85):
     """Normal mode와 Lab mode 단일 예측 후 confidence 높은 쪽 반환.
     위 절반이 어두우면 자동으로 상단 크롭 적용.
 
@@ -188,14 +139,10 @@ def predict_auto(model, img: Image.Image,
         prob      : 선택된 예측 확률 벡터
         used_lab  : Lab mode가 선택됐으면 True
     """
-    img = crop_black_top(img)   # 위 절반 검정이면 자동 제거
+    img = crop_black_top(img)
 
-    arr_normal = preprocess(img, lab_mode=False,
-                            roi_fraction=roi_fraction, skip_top=skip_top)
-    arr_lab    = preprocess(img, lab_mode=True,
-                            roi_fraction=roi_fraction, skip_top=skip_top,
-                            roi_w_fraction=roi_w_fraction,
-                            roi_h_fraction=roi_h_fraction)
+    arr_normal = preprocess(img, lab_mode=False)
+    arr_lab    = preprocess(img, lab_mode=True, zoom=zoom)
 
     prob_normal = model.predict(arr_normal, verbose=0)[0]
     prob_lab    = model.predict(arr_lab,    verbose=0)[0]
@@ -206,15 +153,10 @@ def predict_auto(model, img: Image.Image,
         return prob_lab, True
 
 
-def get_preprocessed_preview(img: Image.Image,
-                              roi_fraction: float = 0.55,
-                              skip_top: float = 0.25,
-                              roi_w_fraction: float = 0.80,
-                              roi_h_fraction: float = 0.25) -> Image.Image:
-    """Return the grayscale ROI crop that the model actually sees (before resize)."""
+def get_preprocessed_preview(img: Image.Image, zoom: float = 0.85) -> Image.Image:
+    """Return the grayscale center-crop that the model sees (before resize)."""
     gray  = to_gray_stretched(img)
-    gray  = crop_roi_by_brightest(gray, roi_fraction, skip_top,
-                                  roi_w_fraction, roi_h_fraction)
+    gray  = center_crop(gray, zoom)
     gray8 = (gray * 255).astype(np.uint8)
     rgb   = np.stack([gray8, gray8, gray8], axis=-1)
     return Image.fromarray(rgb)
@@ -313,23 +255,12 @@ with st.sidebar:
 """
     )
 
-    skip_top     = 0.25
-    roi_fraction = 0.55
-
     st.divider()
-    st.markdown("**ROI 조정** *(Lab 이미지용)*")
-    roi_w_fraction = st.slider(
-        "가로 범위", min_value=0.3, max_value=1.0,
-        value=0.80, step=0.05,
-        help="ROI 가로 = 이미지 너비의 N%")
-    roi_h_fraction = st.slider(
-        "세로 범위", min_value=0.1, max_value=0.6,
-        value=0.25, step=0.05,
-        help="ROI 세로 = 이미지 높이의 N%")
-    skip_top = st.slider(
-        "상단 제외", min_value=0.0, max_value=0.5,
-        value=0.25, step=0.05,
-        help="전자총 그림자 영역 제외 비율")
+    st.markdown("**Zoom** *(Lab 이미지용)*")
+    zoom = st.slider(
+        "중앙 확대 비율", min_value=0.3, max_value=1.0,
+        value=0.85, step=0.05,
+        help="1.0 = 원본, 0.85 = 중앙 85% 확대")
 
     st.divider()
     st.caption(f"Model: Thomson_5 · TF {tf.__version__}")
@@ -372,7 +303,7 @@ if len(uploaded) > 1:
     for f in uploaded:
         try:
             img  = safe_open_rgb(f)
-            prob, _ = predict_auto(model, img, roi_fraction, skip_top, roi_w_fraction, roi_h_fraction)
+            prob, _ = predict_auto(model, img, zoom)
             top  = int(np.argmax(prob))
             rows.append({
                 "File": f.name,
@@ -404,7 +335,7 @@ for f in uploaded:
         st.error(f"`{f.name}` could not be opened: {ex}")
         continue
 
-    prob, used_lab = predict_auto(model, img, roi_fraction, skip_top, roi_w_fraction, roi_h_fraction)
+    prob, used_lab = predict_auto(model, img, zoom)
     top  = int(np.argmax(prob))
     cls  = CLASS_NAMES[top]
     conf = float(prob[top])
@@ -417,7 +348,7 @@ for f in uploaded:
             with c_orig:
                 st.image(img, caption=f"Original: {f.name}", use_container_width=True)
             with c_pre:
-                prev = get_preprocessed_preview(img, roi_fraction, skip_top, roi_w_fraction, roi_h_fraction)
+                prev = get_preprocessed_preview(img, zoom)
                 st.image(prev, caption="Model input (ROI)", use_container_width=True)
         else:
             c_img, c_res = st.columns([1, 1.4])
@@ -428,7 +359,7 @@ for f in uploaded:
             # Surface reconstruction (only for ordered 2D surfaces)
             recon_html = ""
             if cls in ("Streaks", "Mixed"):
-                arr = preprocess(img, used_lab, roi_fraction, skip_top)
+                arr = preprocess(img, used_lab, zoom)
                 recon = detect_reconstruction(arr[0])
                 recon_html = (
                     f'<div style="font-size:12px;color:#555;margin-top:8px;">'
