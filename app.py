@@ -7,7 +7,7 @@ import os
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
@@ -41,10 +41,13 @@ def safe_open_rgb(src) -> Image.Image:
     return img
 
 
-# ── Grayscale conversion ──────────────────────────────────────────────────────
+# ── Grayscale conversion + auto-contrast ─────────────────────────────────────
 def to_grayscale_rgb(img: Image.Image) -> Image.Image:
-    """초록 인광 → 회색조 변환 (R=G=B), 모델은 3채널 RGB 입력 받으므로 RGB로 다시 변환."""
-    return img.convert("L").convert("RGB")
+    """초록 인광 → 회색조 → autocontrast → RGB(R=G=B).
+    autocontrast: 최소→0, 최대→255 매핑. 학습 이미지(고대비) 분포에 가까워짐."""
+    gray = img.convert("L")
+    gray = ImageOps.autocontrast(gray)
+    return gray.convert("RGB")
 
 
 # ── Preprocessing ──────────────────────────────────────────────────────────────
