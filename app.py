@@ -107,7 +107,7 @@ def crop_roi_by_brightest(gray: np.ndarray,
                           roi_fraction: float = 0.55,
                           skip_top: float = 0.25,
                           roi_w_fraction: float = 0.80,
-                          roi_h_fraction: float = 0.42) -> np.ndarray:
+                          roi_h_fraction: float = 0.25) -> np.ndarray:
     """Rectangle-crop capturing the RHEED pattern (wide & short to cut Laue circles).
 
     X (horizontal): brightness-weighted centroid of columns below the gun area,
