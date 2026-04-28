@@ -43,30 +43,40 @@ def safe_open_rgb(src) -> Image.Image:
 
 # ── Crop dark top ────────────────────────────────────────────────────────────
 def crop_dark_top(img: Image.Image) -> Image.Image:
-    """위쪽 어두운 영역(깨진 검정 / 전자총 그림자)을 제거.
+    """위쪽 어두운 영역(깨진 검정 / 전자총 그림자) 제거.
 
-    1) 행별 평균 밝기를 smoothing 으로 정리 (좁은 leakage/scratch 영향 감소)
-    2) Threshold = mean + 0.5 * std (이미지별 적응형, 노이즈에 강함)
-    3) 위에서부터 첫 통과 행에서 자름
+    핵심 아이디어: 짧은 leakage / scratch 영역은 무시하고, **가장 긴 밝은 띠**
+    (= 실제 RHEED 패턴 + glow)의 시작점에서 자른다.
+
+    1) 행별 평균 밝기 → smoothing
+    2) 적응형 threshold (mean + 0.5*std) 위/아래 binary
+    3) 연속된 bright 구간(run)을 모두 찾아 가장 긴 구간의 시작점에서 crop
     """
     arr = np.array(img.convert("L"), dtype=np.float32)
     h, w = arr.shape
 
     row_mean = arr.mean(axis=1)
 
-    # Smoothing: leakage / scratch 같은 좁은 bright row 묻어버리기
-    k = max(10, h // 25)
-    kernel = np.ones(k) / k
-    smoothed = np.convolve(row_mean, kernel, mode="same")
+    # Smoothing
+    k = max(15, h // 20)
+    smoothed = np.convolve(row_mean, np.ones(k) / k, mode="same")
 
-    # 적응형 threshold: 평균 + 0.5*std (눈에 띄게 밝은 행만)
+    # Threshold
     threshold = smoothed.mean() + smoothed.std() * 0.5
+    bright = smoothed >= threshold
 
-    bright_rows = np.where(smoothed >= threshold)[0]
-    if len(bright_rows) == 0:
+    # 연속 bright 구간 (run-length)
+    padded = np.concatenate([[False], bright, [False]])
+    diffs = np.diff(padded.astype(np.int32))
+    starts = np.where(diffs == 1)[0]
+    ends = np.where(diffs == -1)[0]
+
+    if len(starts) == 0:
         return img
 
-    start = int(bright_rows[0])
+    lengths = ends - starts
+    longest_idx = int(lengths.argmax())
+    start = int(starts[longest_idx])
 
     # 너무 작으면 (전체의 5% 미만) 자르지 않음 (학습 이미지 보호)
     if start < h * 0.05:
