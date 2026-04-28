@@ -41,21 +41,24 @@ def safe_open_rgb(src) -> Image.Image:
     return img
 
 
-# ── Variance band ROI ────────────────────────────────────────────────────────
+# ── Brightness + variance band ROI ───────────────────────────────────────────
 def crop_pattern_roi(img: Image.Image, pad_ratio: float = 0.05) -> Image.Image:
-    """행별 표준편차로 RHEED 패턴 영역(가로 띠)만 자동 추출.
+    """RHEED 패턴 영역(가로 띠)을 row_max(밝기) + row_std(변화) 모두 보고 추출.
 
-    검은 영역 / 형광 글로우 → std 낮음 → 자동 제외
-    패턴 영역 → std 높음 → ROI로 선택
-    75 percentile threshold.
+    - 패턴 행: row_max 높음 (밝은 spot/streak) AND row_std 높음 (변화)
+    - 깨진 검은 테두리: std 있어도 row_max 낮음 → 제외
+    - 균일 글로우: row_max 있어도 std 낮음 → 제외
     """
     arr = np.array(img.convert("RGB"), dtype=np.float32)
     gray = np.max(arr, axis=2)
     h, w = gray.shape
 
+    row_max = gray.max(axis=1)
     row_std = gray.std(axis=1)
-    threshold = np.percentile(row_std, 75)
-    pattern_rows = np.where(row_std >= threshold)[0]
+
+    max_thresh = np.percentile(row_max, 60)           # 밝은 행 (top 40%)
+    std_thresh = np.percentile(row_std, 60)           # 변화 있는 행 (top 40%)
+    pattern_rows = np.where((row_max >= max_thresh) & (row_std >= std_thresh))[0]
 
     if len(pattern_rows) < h * 0.05:
         return img                                    # 패턴 없음 → 원본
