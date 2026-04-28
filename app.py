@@ -307,7 +307,20 @@ with st.sidebar:
     if cal_file is not None:
         try:
             cal_img = safe_open_rgb(cal_file)
-            cal_spacing = detect_streak_spacing_px(cal_img)
+            cal_cropped = crop_dark_top(cal_img)
+            cal_gray = to_grayscale_rgb(cal_cropped)
+            cal_streaks = detect_streaks(cal_gray)
+            cal_spacing = cal_streaks["spacing"]
+
+            # Annotated thumbnail (peaks visualized)
+            cal_annotated = annotate_streaks(cal_gray, cal_streaks)
+            n_cal_peaks = len(cal_streaks["peaks"])
+            st.image(
+                cal_annotated,
+                caption=f"Substrate · {n_cal_peaks} peaks detected",
+                use_container_width=True,
+            )
+
             if cal_spacing is not None:
                 # a × d_px = constant
                 st.session_state["cal_const"] = a_sub * cal_spacing
@@ -315,8 +328,7 @@ with st.sidebar:
                 st.session_state["cal_spacing_px"] = cal_spacing
                 st.success(
                     f"✓ Calibrated\n\n"
-                    f"Spacing: **{cal_spacing:.1f} px**\n"
-                    f"= {a_sub} Å"
+                    f"Spacing: **{cal_spacing:.1f} px** = {a_sub} Å"
                 )
             else:
                 st.error("Streak detection failed in calibration image")
