@@ -43,18 +43,26 @@ def safe_open_rgb(src) -> Image.Image:
 
 # ── Crop dark top ────────────────────────────────────────────────────────────
 def crop_dark_top(img: Image.Image) -> Image.Image:
-    """위쪽 어두운 영역(깨진 검정 / 전자총 그림자)을 단순 제거.
+    """위쪽 어두운 영역(깨진 검정 / 전자총 그림자)을 제거.
 
-    행별 평균 밝기를 보고, 위에서부터 처음으로 이미지 중간값(median) 이상인
-    행을 찾아 그 위를 잘라냄. 스크래치 있는 검정도 평균 밝기가 낮아서 잘림.
+    1) 행별 평균 밝기를 smoothing 으로 정리 (좁은 leakage/scratch 영향 감소)
+    2) Threshold = mean + 0.5 * std (이미지별 적응형, 노이즈에 강함)
+    3) 위에서부터 첫 통과 행에서 자름
     """
     arr = np.array(img.convert("L"), dtype=np.float32)
     h, w = arr.shape
 
     row_mean = arr.mean(axis=1)
-    threshold = np.percentile(row_mean, 50)           # median brightness
 
-    bright_rows = np.where(row_mean >= threshold)[0]
+    # Smoothing: leakage / scratch 같은 좁은 bright row 묻어버리기
+    k = max(10, h // 25)
+    kernel = np.ones(k) / k
+    smoothed = np.convolve(row_mean, kernel, mode="same")
+
+    # 적응형 threshold: 평균 + 0.5*std (눈에 띄게 밝은 행만)
+    threshold = smoothed.mean() + smoothed.std() * 0.5
+
+    bright_rows = np.where(smoothed >= threshold)[0]
     if len(bright_rows) == 0:
         return img
 
