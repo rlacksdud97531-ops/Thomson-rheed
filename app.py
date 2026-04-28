@@ -41,40 +41,30 @@ def safe_open_rgb(src) -> Image.Image:
     return img
 
 
-# ── Brightness + variance band ROI ───────────────────────────────────────────
-def crop_pattern_roi(img: Image.Image, pad_ratio: float = 0.05) -> Image.Image:
-    """RHEED 패턴 영역(가로 띠)을 row_max(밝기) + row_std(변화) 모두 보고 추출.
+# ── Crop dark top ────────────────────────────────────────────────────────────
+def crop_dark_top(img: Image.Image) -> Image.Image:
+    """위쪽 어두운 영역(깨진 검정 / 전자총 그림자)을 단순 제거.
 
-    - 패턴 행: row_max 높음 (밝은 spot/streak) AND row_std 높음 (변화)
-    - 깨진 검은 테두리: std 있어도 row_max 낮음 → 제외
-    - 균일 글로우: row_max 있어도 std 낮음 → 제외
+    행별 평균 밝기를 보고, 위에서부터 처음으로 이미지 중간값(median) 이상인
+    행을 찾아 그 위를 잘라냄. 스크래치 있는 검정도 평균 밝기가 낮아서 잘림.
     """
-    arr = np.array(img.convert("RGB"), dtype=np.float32)
-    gray = np.max(arr, axis=2)
-    h, w = gray.shape
+    arr = np.array(img.convert("L"), dtype=np.float32)
+    h, w = arr.shape
 
-    row_max = gray.max(axis=1)
-    row_std = gray.std(axis=1)
+    row_mean = arr.mean(axis=1)
+    threshold = np.percentile(row_mean, 50)           # median brightness
 
-    max_thresh = np.percentile(row_max, 60)           # 밝은 행 (top 40%)
-    std_thresh = np.percentile(row_std, 60)           # 변화 있는 행 (top 40%)
-    pattern_rows = np.where((row_max >= max_thresh) & (row_std >= std_thresh))[0]
-
-    if len(pattern_rows) < h * 0.05:
-        return img                                    # 패턴 없음 → 원본
-
-    y_min = int(pattern_rows.min())
-    y_max = int(pattern_rows.max())
-
-    pad = int(h * pad_ratio)
-    y_min = max(0, y_min - pad)
-    y_max = min(h, y_max + pad)
-
-    # 거의 전체면 자를 필요 없음 (학습 이미지 보호)
-    if (y_max - y_min) > h * 0.85:
+    bright_rows = np.where(row_mean >= threshold)[0]
+    if len(bright_rows) == 0:
         return img
 
-    return img.crop((0, y_min, w, y_max))
+    start = int(bright_rows[0])
+
+    # 너무 작으면 (전체의 5% 미만) 자르지 않음 (학습 이미지 보호)
+    if start < h * 0.05:
+        return img
+
+    return img.crop((0, start, w, h))
 
 
 # ── Grayscale conversion + auto-contrast ─────────────────────────────────────
@@ -88,10 +78,10 @@ def to_grayscale_rgb(img: Image.Image) -> Image.Image:
 
 # ── Preprocessing ──────────────────────────────────────────────────────────────
 def preprocess(img: Image.Image) -> tuple[np.ndarray, Image.Image]:
-    """ROI 추출 → grayscale → autocontrast → resize → normalize.
+    """검은 상단 제거 → grayscale → autocontrast → resize → normalize.
     Returns (array, processed_img) — processed_img는 시각화용."""
-    roi = crop_pattern_roi(img)
-    gray = to_grayscale_rgb(roi)
+    cropped = crop_dark_top(img)
+    gray = to_grayscale_rgb(cropped)
     resized = gray.resize(IMG_SIZE)
     arr = (np.array(resized, dtype=np.float32) / 255.0)[np.newaxis]
     return arr, gray
