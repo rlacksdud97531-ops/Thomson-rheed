@@ -288,7 +288,8 @@ for f in uploaded:
                 st.markdown(
                     f'<div style="font-size:14px;color:#555;margin-top:6px;">'
                     f'<b>Surface reconstruction:</b> '
-                    f'<span style="font-family:monospace;color:{col};">{recon}</span>'
+                    f'<span style="font-family:monospace;color:#1e293b;'
+                    f'font-weight:600;">{recon}</span>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
