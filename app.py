@@ -278,36 +278,17 @@ for f in uploaded:
         with c_gray:
             st.image(gray_img, caption="Model input (grayscale)", use_container_width=True)
         with c_res:
-            # Streak / Mixed 일 때만 reconstruction 추정
-            recon_html = ""
-            if cls in ("Streaks", "Mixed"):
-                recon = detect_reconstruction(arr[0])
-                recon_html = (
-                    f'<div style="font-size:13px;color:#555;margin-top:8px;">'
-                    f'<b>Surface reconstruction:</b> '
-                    f'<span style="font-family:monospace;color:{col};">{recon}</span>'
-                    f'</div>'
-                )
-
-            st.markdown(
-                f"""
-                <div style="padding:14px;border-radius:8px;
-                            background:{col}18;border-left:5px solid {col};
-                            margin-bottom:10px;">
-                    <div style="font-size:11px;color:#888;letter-spacing:.5px;">
-                        PREDICTION
-                    </div>
-                    <div style="font-size:26px;font-weight:700;color:{col};">
-                        {cls}
-                    </div>
-                    <div style="font-size:13px;color:#555;margin-top:2px;">
-                        Confidence: <b>{conf*100:.1f}%</b>
-                    </div>
-                    {recon_html}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
             fig = plot_probs(prob)
             st.pyplot(fig)
             plt.close(fig)
+
+            # Streak / Mixed 일 때만 reconstruction 표시
+            if cls in ("Streaks", "Mixed"):
+                recon = detect_reconstruction(arr[0])
+                st.markdown(
+                    f'<div style="font-size:14px;color:#555;margin-top:6px;">'
+                    f'<b>Surface reconstruction:</b> '
+                    f'<span style="font-family:monospace;color:{col};">{recon}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
