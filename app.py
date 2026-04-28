@@ -179,18 +179,20 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
 
 
 # ── Streak detection (peaks + spacing) ──────────────────────────────────────
-def detect_streaks(img: Image.Image, edge_margin: float = 0.10) -> dict:
+def detect_streaks(img: Image.Image,
+                   edge_margin: float = 0.10,
+                   min_dist_ratio: float = 0.04) -> dict:
     """이미지에서 streak peak 위치 + 간격 검출.
 
-    img: cropped 또는 grayscale image (이미 crop_dark_top 적용된 거)
-    edge_margin: 좌우 가장자리에서 무시할 비율 (기본 10%) — RHEED 스크린
-                 가장자리 artifact 제거용
+    img: cropped 또는 grayscale image
+    edge_margin: 좌우 가장자리에서 무시할 비율 (기본 10%)
+    min_dist_ratio: peak 사이 최소 거리 (분석 창 너비 대비, 기본 4%)
+                   → 같은 클러스터의 중복 peak 제거
 
     Returns dict:
-      - peaks:   list of column indices (px, 전체 이미지 좌표 기준)
+      - peaks:   list of column indices (전체 이미지 좌표)
       - spacing: median gap (px) or None
-      - r0, r1:  분석에 사용한 행 범위
-      - c0, c1:  분석에 사용한 열 범위 (중앙)
+      - r0, r1, c0, c1: 분석에 사용한 영역
     """
     arr = np.array(img.convert("L"), dtype=np.float32) / 255.0
     h, w = arr.shape
@@ -210,18 +212,26 @@ def detect_streaks(img: Image.Image, edge_margin: float = 0.10) -> dict:
                 "r0": r0, "r1": r1, "c0": c0, "c1": c1}
     profile = profile / pmax
 
-    # Local maxima (window 내 좌표)
-    local_peaks = [i for i in range(1, win_w - 1)
-                   if profile[i] > profile[i - 1]
-                   and profile[i] > profile[i + 1]
-                   and profile[i] > 0.15]
+    # 후보 local maxima (높이 0.15 이상)
+    candidates = [(i, float(profile[i])) for i in range(1, win_w - 1)
+                  if profile[i] > profile[i - 1]
+                  and profile[i] > profile[i + 1]
+                  and profile[i] > 0.15]
 
-    # 전체 이미지 좌표로 변환
-    peaks = [p + c0 for p in local_peaks]
+    # 같은 클러스터 안에서는 가장 밝은 peak 하나만 유지
+    # (밝기 내림차순으로 보면서, 이미 선택된 peak 와 min_dist 이상 떨어진 것만 add)
+    min_dist = max(3, int(win_w * min_dist_ratio))
+    selected = []
+    for pos, height in sorted(candidates, key=lambda x: -x[1]):
+        if all(abs(pos - p) >= min_dist for p, _ in selected):
+            selected.append((pos, height))
+
+    # 위치 순으로 정렬 → 전체 이미지 좌표로 변환
+    selected.sort(key=lambda x: x[0])
+    peaks = [p + c0 for p, _ in selected]
 
     spacing = None
     if len(peaks) >= 2:
-        peaks.sort()
         gaps = [peaks[j + 1] - peaks[j] for j in range(len(peaks) - 1)]
         if gaps:
             spacing = float(np.median(gaps))
