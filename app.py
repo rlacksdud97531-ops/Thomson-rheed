@@ -7,7 +7,7 @@ import os
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
@@ -178,45 +178,71 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
         return "—"
 
 
-# ── Streak spacing in pixels (for lattice calibration) ──────────────────────
-def detect_streak_spacing_px(img: Image.Image) -> float | None:
-    """원본 해상도에서 streak 간 평균 간격(픽셀) 측정.
+# ── Streak detection (peaks + spacing) ──────────────────────────────────────
+def detect_streaks(img: Image.Image) -> dict:
+    """이미지에서 streak peak 위치 + 간격 검출.
 
-    crop_dark_top 적용 후 가운데 행 평균 brightness profile에서 peak 추출
-    → peak 사이 gap 의 median 값 반환.
-    Returns None if 검출 실패.
+    img: cropped 또는 grayscale image (이미 crop_dark_top 적용된 거)
+    Returns dict:
+      - peaks: list of column indices (px)
+      - spacing: median gap (px) or None
+      - r0, r1: 분석에 사용한 행 범위
     """
-    cropped = crop_dark_top(img)
-    arr = np.array(cropped.convert("L"), dtype=np.float32) / 255.0
+    arr = np.array(img.convert("L"), dtype=np.float32) / 255.0
     h, w = arr.shape
 
-    # 가운데 25-70% 행 평균 → 가로 profile
     r0, r1 = int(h * 0.25), int(h * 0.70)
     profile = arr[r0:r1].mean(axis=0)
 
-    # Smoothing
     k = max(3, w // 35)
     profile = np.convolve(profile, np.ones(k) / k, mode="same")
 
     pmax = profile.max()
     if pmax < 0.03:
-        return None
+        return {"peaks": [], "spacing": None, "r0": r0, "r1": r1}
     profile = profile / pmax
 
-    # 15% 이상 local maxima
     peaks = [i for i in range(1, w - 1)
              if profile[i] > profile[i - 1]
              and profile[i] > profile[i + 1]
              and profile[i] > 0.15]
 
-    if len(peaks) < 2:
-        return None
+    spacing = None
+    if len(peaks) >= 2:
+        peaks.sort()
+        gaps = [peaks[j + 1] - peaks[j] for j in range(len(peaks) - 1)]
+        if gaps:
+            spacing = float(np.median(gaps))
 
-    peaks.sort()
-    gaps = [peaks[j + 1] - peaks[j] for j in range(len(peaks) - 1)]
-    if not gaps:
-        return None
-    return float(np.median(gaps))
+    return {"peaks": peaks, "spacing": spacing, "r0": r0, "r1": r1}
+
+
+def detect_streak_spacing_px(img: Image.Image):
+    """Backward-compat wrapper. Returns spacing only."""
+    cropped = crop_dark_top(img)
+    return detect_streaks(cropped)["spacing"]
+
+
+def annotate_streaks(img: Image.Image, streaks: dict) -> Image.Image:
+    """Streak peak 위치를 빨간 세로줄로, 분석 행 범위를 노란 가로줄로 표시."""
+    annotated = img.copy().convert("RGB")
+    draw = ImageDraw.Draw(annotated)
+    w, h = annotated.size
+
+    # 분석 행 범위 (노란 가로줄)
+    r0 = streaks.get("r0")
+    r1 = streaks.get("r1")
+    if r0 is not None:
+        draw.line([(0, r0), (w - 1, r0)], fill="yellow", width=2)
+    if r1 is not None:
+        draw.line([(0, r1), (w - 1, r1)], fill="yellow", width=2)
+
+    # Peak 위치 (빨간 세로줄)
+    line_w = max(2, w // 200)
+    for p in streaks.get("peaks", []):
+        draw.line([(p, 0), (p, h - 1)], fill="red", width=line_w)
+
+    return annotated
 
 
 # ── Probability bar chart ──────────────────────────────────────────────────────
@@ -377,12 +403,18 @@ for f in uploaded:
     conf = float(prob[top])
     col  = CLASS_COLORS[top]
 
+    # Streak detection on the gray image (post-crop, post-autocontrast)
+    streaks = detect_streaks(gray_img)
+    annotated = annotate_streaks(gray_img, streaks)
+
     with st.container(border=True):
         c_orig, c_gray, c_res = st.columns([1, 1, 1.4])
         with c_orig:
             st.image(img, caption=f"Original: {f.name}", use_container_width=True)
         with c_gray:
-            st.image(gray_img, caption="Model input (grayscale)", use_container_width=True)
+            n_peaks = len(streaks["peaks"])
+            cap = f"Detected {n_peaks} peaks" if n_peaks else "No peaks detected"
+            st.image(annotated, caption=cap, use_container_width=True)
         with c_res:
             fig = plot_probs(prob)
             st.pyplot(fig)
@@ -402,7 +434,7 @@ for f in uploaded:
 
                 # Lattice constant (calibration이 있을 때만)
                 if "cal_const" in st.session_state:
-                    spacing_px = detect_streak_spacing_px(img)
+                    spacing_px = streaks["spacing"]
                     if spacing_px is not None:
                         a_growth = st.session_state["cal_const"] / spacing_px
                         st.markdown(
