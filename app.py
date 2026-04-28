@@ -179,33 +179,45 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
 
 
 # ── Streak detection (peaks + spacing) ──────────────────────────────────────
-def detect_streaks(img: Image.Image) -> dict:
+def detect_streaks(img: Image.Image, edge_margin: float = 0.10) -> dict:
     """이미지에서 streak peak 위치 + 간격 검출.
 
     img: cropped 또는 grayscale image (이미 crop_dark_top 적용된 거)
+    edge_margin: 좌우 가장자리에서 무시할 비율 (기본 10%) — RHEED 스크린
+                 가장자리 artifact 제거용
+
     Returns dict:
-      - peaks: list of column indices (px)
+      - peaks:   list of column indices (px, 전체 이미지 좌표 기준)
       - spacing: median gap (px) or None
-      - r0, r1: 분석에 사용한 행 범위
+      - r0, r1:  분석에 사용한 행 범위
+      - c0, c1:  분석에 사용한 열 범위 (중앙)
     """
     arr = np.array(img.convert("L"), dtype=np.float32) / 255.0
     h, w = arr.shape
 
     r0, r1 = int(h * 0.25), int(h * 0.70)
-    profile = arr[r0:r1].mean(axis=0)
+    c0, c1 = int(w * edge_margin), int(w * (1 - edge_margin))
 
-    k = max(3, w // 35)
+    profile = arr[r0:r1, c0:c1].mean(axis=0)
+    win_w = c1 - c0
+
+    k = max(3, win_w // 35)
     profile = np.convolve(profile, np.ones(k) / k, mode="same")
 
     pmax = profile.max()
     if pmax < 0.03:
-        return {"peaks": [], "spacing": None, "r0": r0, "r1": r1}
+        return {"peaks": [], "spacing": None,
+                "r0": r0, "r1": r1, "c0": c0, "c1": c1}
     profile = profile / pmax
 
-    peaks = [i for i in range(1, w - 1)
-             if profile[i] > profile[i - 1]
-             and profile[i] > profile[i + 1]
-             and profile[i] > 0.15]
+    # Local maxima (window 내 좌표)
+    local_peaks = [i for i in range(1, win_w - 1)
+                   if profile[i] > profile[i - 1]
+                   and profile[i] > profile[i + 1]
+                   and profile[i] > 0.15]
+
+    # 전체 이미지 좌표로 변환
+    peaks = [p + c0 for p in local_peaks]
 
     spacing = None
     if len(peaks) >= 2:
@@ -214,7 +226,8 @@ def detect_streaks(img: Image.Image) -> dict:
         if gaps:
             spacing = float(np.median(gaps))
 
-    return {"peaks": peaks, "spacing": spacing, "r0": r0, "r1": r1}
+    return {"peaks": peaks, "spacing": spacing,
+            "r0": r0, "r1": r1, "c0": c0, "c1": c1}
 
 
 def detect_streak_spacing_px(img: Image.Image):
@@ -224,23 +237,25 @@ def detect_streak_spacing_px(img: Image.Image):
 
 
 def annotate_streaks(img: Image.Image, streaks: dict) -> Image.Image:
-    """Streak peak 위치를 빨간 세로줄로, 분석 행 범위를 노란 가로줄로 표시."""
+    """Streak peak 위치를 빨간 세로줄로, 분석 영역을 노란 사각형 윤곽으로 표시."""
     annotated = img.copy().convert("RGB")
     draw = ImageDraw.Draw(annotated)
     w, h = annotated.size
 
-    # 분석 행 범위 (노란 가로줄)
+    # 분석 영역 윤곽 (노란 사각형)
     r0 = streaks.get("r0")
     r1 = streaks.get("r1")
-    if r0 is not None:
-        draw.line([(0, r0), (w - 1, r0)], fill="yellow", width=2)
-    if r1 is not None:
-        draw.line([(0, r1), (w - 1, r1)], fill="yellow", width=2)
+    c0 = streaks.get("c0", 0)
+    c1 = streaks.get("c1", w)
+    if r0 is not None and r1 is not None:
+        draw.rectangle([(c0, r0), (c1 - 1, r1 - 1)], outline="yellow", width=2)
 
-    # Peak 위치 (빨간 세로줄)
+    # Peak 위치 (빨간 세로줄, 분석 행 범위 안에서만)
     line_w = max(2, w // 200)
+    y0 = r0 if r0 is not None else 0
+    y1 = (r1 - 1) if r1 is not None else (h - 1)
     for p in streaks.get("peaks", []):
-        draw.line([(p, 0), (p, h - 1)], fill="red", width=line_w)
+        draw.line([(p, y0), (p, y1)], fill="red", width=line_w)
 
     return annotated
 
