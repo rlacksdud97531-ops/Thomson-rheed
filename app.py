@@ -43,18 +43,25 @@ def safe_open_rgb(src) -> Image.Image:
 
 # ── Crop dark top ────────────────────────────────────────────────────────────
 def crop_dark_top(img: Image.Image) -> Image.Image:
-    """위쪽 어두운 영역(깨진 검정 / 전자총 그림자)을 단순 제거.
+    """위쪽 어두운 영역(깨진 검정 / 전자총 그림자)을 제거.
 
-    행별 평균 밝기를 보고, 위에서부터 처음으로 이미지 중간값(median) 이상인
-    행을 찾아 그 위를 잘라냄. 스크래치 있는 검정도 평균 밝기가 낮아서 잘림.
+    행별 평균 밝기를 smoothing(노이즈 무시) 한 후, 위에서부터 처음으로
+    median 이상인 행을 찾아 그 위를 잘라냄. 깨진 검정 영역의 스크래치는
+    smoothing 으로 무시됨 → 진짜 패턴 시작점만 잡힘.
     """
     arr = np.array(img.convert("L"), dtype=np.float32)
     h, w = arr.shape
 
     row_mean = arr.mean(axis=1)
-    threshold = np.percentile(row_mean, 50)           # median brightness
 
-    bright_rows = np.where(row_mean >= threshold)[0]
+    # Smoothing: 좁은 스크래치 노이즈 무시 (kernel = h/30 정도)
+    k = max(5, h // 30)
+    kernel = np.ones(k) / k
+    smoothed = np.convolve(row_mean, kernel, mode="same")
+
+    threshold = np.percentile(smoothed, 50)           # median brightness
+
+    bright_rows = np.where(smoothed >= threshold)[0]
     if len(bright_rows) == 0:
         return img
 
