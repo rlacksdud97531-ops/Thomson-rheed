@@ -41,6 +41,39 @@ def safe_open_rgb(src) -> Image.Image:
     return img
 
 
+# ── Variance band ROI ────────────────────────────────────────────────────────
+def crop_pattern_roi(img: Image.Image, pad_ratio: float = 0.05) -> Image.Image:
+    """행별 표준편차로 RHEED 패턴 영역(가로 띠)만 자동 추출.
+
+    검은 영역 / 형광 글로우 → std 낮음 → 자동 제외
+    패턴 영역 → std 높음 → ROI로 선택
+    75 percentile threshold.
+    """
+    arr = np.array(img.convert("RGB"), dtype=np.float32)
+    gray = np.max(arr, axis=2)
+    h, w = gray.shape
+
+    row_std = gray.std(axis=1)
+    threshold = np.percentile(row_std, 75)
+    pattern_rows = np.where(row_std >= threshold)[0]
+
+    if len(pattern_rows) < h * 0.05:
+        return img                                    # 패턴 없음 → 원본
+
+    y_min = int(pattern_rows.min())
+    y_max = int(pattern_rows.max())
+
+    pad = int(h * pad_ratio)
+    y_min = max(0, y_min - pad)
+    y_max = min(h, y_max + pad)
+
+    # 거의 전체면 자를 필요 없음 (학습 이미지 보호)
+    if (y_max - y_min) > h * 0.85:
+        return img
+
+    return img.crop((0, y_min, w, y_max))
+
+
 # ── Grayscale conversion + auto-contrast ─────────────────────────────────────
 def to_grayscale_rgb(img: Image.Image) -> Image.Image:
     """초록 인광 → 회색조 → autocontrast → RGB(R=G=B).
@@ -52,9 +85,10 @@ def to_grayscale_rgb(img: Image.Image) -> Image.Image:
 
 # ── Preprocessing ──────────────────────────────────────────────────────────────
 def preprocess(img: Image.Image) -> tuple[np.ndarray, Image.Image]:
-    """Grayscale → resize → normalize → (1, 260, 260, 3) float32.
-    Returns (array, gray_img) — gray_img는 시각화용."""
-    gray = to_grayscale_rgb(img)
+    """ROI 추출 → grayscale → autocontrast → resize → normalize.
+    Returns (array, processed_img) — processed_img는 시각화용."""
+    roi = crop_pattern_roi(img)
+    gray = to_grayscale_rgb(roi)
     resized = gray.resize(IMG_SIZE)
     arr = (np.array(resized, dtype=np.float32) / 255.0)[np.newaxis]
     return arr, gray
