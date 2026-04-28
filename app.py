@@ -25,6 +25,19 @@ CLASS_NAMES  = ["Mixed", "Unclear", "Spotty", "Streaks"]
 CLASS_COLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12"]
 IMG_SIZE     = (260, 260)
 
+# Substrate database — bulk in-plane lattice constant (Å)
+SUBSTRATES = {
+    "Sapphire (Al₂O₃) c-plane":  4.785,
+    "Si (100)":                  5.431,
+    "Si (111)":                  5.431,
+    "GaAs (100)":                5.653,
+    "SrTiO₃ (100)":              3.905,
+    "MgO (100)":                 4.213,
+    "LaAlO₃ (100)":              3.789,
+    "MgAl₂O₄ (100)":             8.083,
+    "Custom":                    None,
+}
+
 
 # ── Image loading ──────────────────────────────────────────────────────────────
 def safe_open_rgb(src) -> Image.Image:
@@ -165,6 +178,47 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
         return "—"
 
 
+# ── Streak spacing in pixels (for lattice calibration) ──────────────────────
+def detect_streak_spacing_px(img: Image.Image) -> float | None:
+    """원본 해상도에서 streak 간 평균 간격(픽셀) 측정.
+
+    crop_dark_top 적용 후 가운데 행 평균 brightness profile에서 peak 추출
+    → peak 사이 gap 의 median 값 반환.
+    Returns None if 검출 실패.
+    """
+    cropped = crop_dark_top(img)
+    arr = np.array(cropped.convert("L"), dtype=np.float32) / 255.0
+    h, w = arr.shape
+
+    # 가운데 25-70% 행 평균 → 가로 profile
+    r0, r1 = int(h * 0.25), int(h * 0.70)
+    profile = arr[r0:r1].mean(axis=0)
+
+    # Smoothing
+    k = max(3, w // 35)
+    profile = np.convolve(profile, np.ones(k) / k, mode="same")
+
+    pmax = profile.max()
+    if pmax < 0.03:
+        return None
+    profile = profile / pmax
+
+    # 15% 이상 local maxima
+    peaks = [i for i in range(1, w - 1)
+             if profile[i] > profile[i - 1]
+             and profile[i] > profile[i + 1]
+             and profile[i] > 0.15]
+
+    if len(peaks) < 2:
+        return None
+
+    peaks.sort()
+    gaps = [peaks[j + 1] - peaks[j] for j in range(len(peaks) - 1)]
+    if not gaps:
+        return None
+    return float(np.median(gaps))
+
+
 # ── Probability bar chart ──────────────────────────────────────────────────────
 def plot_probs(probs):
     fig, ax = plt.subplots(figsize=(6, 2.8))
@@ -198,6 +252,58 @@ with st.sidebar:
 ---
 """
     )
+
+    # ── Lattice constant calibration ─────────────────────────────────────
+    st.subheader("📐 Lattice Calibration")
+
+    substrate = st.selectbox(
+        "Substrate",
+        options=list(SUBSTRATES.keys()),
+        index=0,
+    )
+    a_sub_default = SUBSTRATES[substrate]
+    if a_sub_default is None:
+        a_sub = st.number_input(
+            "Custom a (Å)", min_value=0.1, max_value=20.0,
+            value=4.0, step=0.001, format="%.3f")
+    else:
+        a_sub = a_sub_default
+        st.caption(f"Bulk a = **{a_sub} Å**")
+
+    cal_file = st.file_uploader(
+        "Bare substrate RHEED",
+        type=["png", "jpg", "jpeg", "bmp", "tif", "tiff"],
+        key="cal_upload",
+        label_visibility="collapsed",
+        help="사파이어 substrate 이미지를 업로드해서 calibration",
+    )
+
+    if cal_file is not None:
+        try:
+            cal_img = safe_open_rgb(cal_file)
+            cal_spacing = detect_streak_spacing_px(cal_img)
+            if cal_spacing is not None:
+                # a × d_px = constant
+                st.session_state["cal_const"] = a_sub * cal_spacing
+                st.session_state["cal_substrate"] = substrate
+                st.session_state["cal_spacing_px"] = cal_spacing
+                st.success(
+                    f"✓ Calibrated\n\n"
+                    f"Spacing: **{cal_spacing:.1f} px**\n"
+                    f"= {a_sub} Å"
+                )
+            else:
+                st.error("Streak detection failed in calibration image")
+        except Exception as ex:
+            st.error(f"Calibration failed: {ex}")
+    elif "cal_const" in st.session_state:
+        st.info(
+            f"Using stored calibration\n"
+            f"({st.session_state.get('cal_substrate', '?')}, "
+            f"{st.session_state.get('cal_spacing_px', 0):.1f} px)"
+        )
+
+    st.divider()
     st.caption(f"Model: Thomson_5 · TF {tf.__version__}")
     st.caption("© 2026 rlack")
 
@@ -282,7 +388,7 @@ for f in uploaded:
             st.pyplot(fig)
             plt.close(fig)
 
-            # Streak / Mixed 일 때만 reconstruction 표시
+            # Streak / Mixed 일 때만 reconstruction & lattice constant 표시
             if cls in ("Streaks", "Mixed"):
                 recon = detect_reconstruction(arr[0])
                 st.markdown(
@@ -293,3 +399,26 @@ for f in uploaded:
                     f'</div>',
                     unsafe_allow_html=True,
                 )
+
+                # Lattice constant (calibration이 있을 때만)
+                if "cal_const" in st.session_state:
+                    spacing_px = detect_streak_spacing_px(img)
+                    if spacing_px is not None:
+                        a_growth = st.session_state["cal_const"] / spacing_px
+                        st.markdown(
+                            f'<div style="font-size:14px;color:#555;margin-top:4px;">'
+                            f'<b>Lattice constant:</b> '
+                            f'<span style="font-family:monospace;color:#1e293b;'
+                            f'font-weight:600;">{a_growth:.3f} Å</span>'
+                            f'<span style="font-size:11px;color:#999;margin-left:6px;">'
+                            f'({spacing_px:.1f} px)</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            '<div style="font-size:13px;color:#999;margin-top:4px;">'
+                            'Lattice: streak detection failed'
+                            '</div>',
+                            unsafe_allow_html=True,
+                        )
