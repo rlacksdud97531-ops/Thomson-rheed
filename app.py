@@ -113,6 +113,58 @@ def load_model():
     return keras.models.load_model(MODEL_PATH)
 
 
+# ── Surface reconstruction estimation ────────────────────────────────────────
+def detect_reconstruction(model_input: np.ndarray) -> str:
+    """Streak 간 가로 간격으로 표면 재구성(reconstruction) 추정.
+
+    model_input: (260, 260, 3) float32 — 모델이 본 그 배열.
+    Returns: '1×1', '2×1', '√2×√2 R45°', or '—'
+    """
+    gray = model_input.mean(axis=2)                   # (H, W)
+    h, w = gray.shape
+
+    # 가로 brightness profile (위/아래 노이즈 제외, 가운데 영역만 사용)
+    r0, r1 = int(h * 0.25), int(h * 0.70)
+    profile = gray[r0:r1].mean(axis=0)                # (W,)
+
+    # Smoothing (~3% of width)
+    k = max(3, w // 35)
+    profile = np.convolve(profile, np.ones(k) / k, mode="same")
+
+    pmax = profile.max()
+    if pmax < 0.03:
+        return "—"
+    profile = profile / pmax
+
+    # 15% 이상의 local maxima만 유효 streak peak
+    peaks = [i for i in range(1, w - 1)
+             if profile[i] > profile[i - 1]
+             and profile[i] > profile[i + 1]
+             and profile[i] > 0.15]
+
+    if len(peaks) < 2:
+        return "—"
+
+    peaks.sort()
+    gaps = [peaks[j + 1] - peaks[j] for j in range(len(peaks) - 1)]
+    d_max = max(gaps)
+    d_min = min(gaps)
+
+    if d_max == 0:
+        return "—"
+
+    ratio = d_min / d_max
+
+    if ratio > 0.82:        # 균등 간격 → bulk periodicity
+        return "1×1"
+    elif ratio > 0.60:      # ≈ 1/√2 ≈ 0.707
+        return "√2×√2 R45°"
+    elif ratio > 0.35:      # ≈ 1/2 = 0.50
+        return "2×1"
+    else:
+        return "—"
+
+
 # ── Probability bar chart ──────────────────────────────────────────────────────
 def plot_probs(probs):
     fig, ax = plt.subplots(figsize=(6, 2.8))
@@ -226,6 +278,17 @@ for f in uploaded:
         with c_gray:
             st.image(gray_img, caption="Model input (grayscale)", use_container_width=True)
         with c_res:
+            # Streak / Mixed 일 때만 reconstruction 추정
+            recon_html = ""
+            if cls in ("Streaks", "Mixed"):
+                recon = detect_reconstruction(arr[0])
+                recon_html = (
+                    f'<div style="font-size:13px;color:#555;margin-top:8px;">'
+                    f'<b>Surface reconstruction:</b> '
+                    f'<span style="font-family:monospace;color:{col};">{recon}</span>'
+                    f'</div>'
+                )
+
             st.markdown(
                 f"""
                 <div style="padding:14px;border-radius:8px;
@@ -240,6 +303,7 @@ for f in uploaded:
                     <div style="font-size:13px;color:#555;margin-top:2px;">
                         Confidence: <b>{conf*100:.1f}%</b>
                     </div>
+                    {recon_html}
                 </div>
                 """,
                 unsafe_allow_html=True,
