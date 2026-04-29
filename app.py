@@ -205,8 +205,6 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
-st.header("Upload RHEED Image(s)")
-
 model = load_model()
 if model is None:
     st.error(f"Model file not found: `{MODEL_PATH}`")
@@ -288,7 +286,8 @@ for f in uploaded:
                 st.markdown(
                     f'<div style="font-size:14px;color:#555;margin-top:6px;">'
                     f'<b>Surface reconstruction:</b> '
-                    f'<span style="font-family:monospace;color:{col};">{recon}</span>'
+                    f'<span style="font-family:monospace;color:#000;'
+                    f'font-weight:600;">{recon}</span>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
