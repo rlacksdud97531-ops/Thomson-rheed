@@ -274,7 +274,7 @@ for f in uploaded:
         with c_orig:
             st.image(img, caption=f"Original: {f.name}", use_container_width=True)
         with c_gray:
-            st.image(gray_img, caption="Model input (grayscale)", use_container_width=True)
+            st.image(gray_img, use_container_width=True)
         with c_res:
             fig = plot_probs(prob)
             st.pyplot(fig)
