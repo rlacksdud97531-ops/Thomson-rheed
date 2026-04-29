@@ -22,7 +22,7 @@ st.set_page_config(
 # ── Constants ──────────────────────────────────────────────────────────────────
 MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Thomson_5.keras")
 CLASS_NAMES  = ["Mixed", "Unclear", "Spotty", "Streaks"]
-CLASS_COLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12"]
+CLASS_COLORS = ["#374151", "#374151", "#374151", "#374151"]  # 단색 (gray-700)
 IMG_SIZE     = (260, 260)
 
 
@@ -188,12 +188,12 @@ with st.sidebar:
     st.markdown(
         """
 **Classes**
-| | Class | Pattern |
-|---|---|---|
-| 🔴 | Mixed | Periodic streak modulation |
-| 🔵 | Unclear | Irregular transmission spots |
-| 🟢 | Spotty | Discrete 3D island spots |
-| 🟡 | Streaks | Smooth 2D growth streaks |
+| Class | Pattern |
+|---|---|
+| Mixed | Periodic streak modulation |
+| Unclear | Irregular transmission spots |
+| Spotty | Discrete 3D island spots |
+| Streaks | Smooth 2D growth streaks |
 
 ---
 """
