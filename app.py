@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Thomson_5.keras")
+MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Thomson_42_best_model.keras")
 CLASS_NAMES  = ["Mixed", "Unclear", "Spotty", "Streaks"]
 CLASS_COLORS = ["#374151", "#374151", "#374151", "#374151"]  # 단색 (gray-700)
 IMG_SIZE     = (260, 260)
@@ -198,7 +198,7 @@ with st.sidebar:
 ---
 """
     )
-    st.caption(f"Model: Thomson_5 · TF {tf.__version__}")
+    st.caption(f"Model: Thomson_42 · TF {tf.__version__}")
     st.caption("© 2026 rlack")
 
 
