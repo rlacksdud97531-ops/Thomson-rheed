@@ -5,3 +5,4 @@ pillow>=10.0
 pandas>=2.0
 matplotlib>=3.8
 h5py>=3.10
+opencv-python-headless>=4.8

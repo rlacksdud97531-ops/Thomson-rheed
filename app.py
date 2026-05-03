@@ -11,6 +11,7 @@ from PIL import Image, ImageOps
 import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
+import cv2
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -165,6 +166,58 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
         return "—"
 
 
+# ── Kikuchi-like line detector ────────────────────────────────────────────────
+def detect_kikuchi(gray_pil: Image.Image) -> tuple[np.ndarray, int, bool]:
+    """CLAHE → Canny → Hough 로 대각선 라인(Kikuchi-like 후보)을 검출한다.
+
+    gray_pil : 전처리된 grayscale PIL 이미지 (full-res, before 260×260 resize)
+    Returns  : (overlay_rgb: np.ndarray uint8, n_lines: int, detected: bool)
+
+    ⚠️ 이것은 후보 검출 (geometry 기반)이며 물리적 Kikuchi 확정이 아님.
+    """
+    gray = np.array(gray_pil.convert("L"), dtype=np.uint8)
+    h, w = gray.shape
+
+    # CLAHE — 흐릿한 band도 보이게 대비 강화
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    # Blur → Canny edges
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
+    edges   = cv2.Canny(blurred, 40, 120)
+
+    # 분석 ROI: 상단 15%, 하단 10% 제외 (노이즈·가장자리 반사 회피)
+    y1, y2   = int(h * 0.15), int(h * 0.90)
+    roi_edges = edges[y1:y2, :]
+
+    # Hough probabilistic line transform
+    min_len = max(25, int(0.12 * min(h, w)))
+    lines   = cv2.HoughLinesP(
+        roi_edges, rho=1, theta=np.pi / 180,
+        threshold=35, minLineLength=min_len, maxLineGap=12,
+    )
+
+    # 대각선만 Kikuchi 후보로 인정 (15–75°, 수평·수직 제외)
+    kikuchi = []
+    if lines is not None:
+        for seg in lines:
+            x1, ly1, x2, ly2 = seg[0]
+            dx, dy = x2 - x1, ly2 - ly1
+            angle  = abs(np.degrees(np.arctan2(dy, dx)))
+            if angle > 90:
+                angle = 180 - angle
+            if 15 < angle < 75:
+                kikuchi.append((x1, ly1 + y1, x2, ly2 + y1))
+
+    # 오버레이: 원본 grayscale + 빨간 라인
+    overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+    for (x1, ly1, x2, ly2) in kikuchi:
+        cv2.line(overlay, (x1, ly1), (x2, ly2), (220, 60, 60), 2)
+
+    detected = len(kikuchi) >= 2   # 라인 2개 이상일 때 "detected"
+    return overlay, len(kikuchi), detected
+
+
 # ── Probability bar chart ──────────────────────────────────────────────────────
 def plot_probs(probs):
     fig, ax = plt.subplots(figsize=(6, 2.8))
@@ -291,3 +344,24 @@ for f in uploaded:
                     f'</div>',
                     unsafe_allow_html=True,
                 )
+
+        # ── Kikuchi-like line overlay ─────────────────────────────────────────
+        st.divider()
+        st.caption("🔍 Kikuchi-like line analysis (candidate detection only)")
+        kk_overlay, kk_count, kk_detected = detect_kikuchi(gray_img)
+        c_kk, c_kk_info = st.columns([2, 1])
+        with c_kk:
+            st.image(
+                kk_overlay,
+                caption="Red lines = diagonal line candidates",
+                use_container_width=True,
+            )
+        with c_kk_info:
+            if kk_detected:
+                st.success(f"✅ {kk_count} candidate line(s) detected")
+            else:
+                st.info(f"⚪ Not detected ({kk_count} line(s) found)")
+            st.caption(
+                "Detection is based on diagonal line geometry (Hough transform). "
+                "This is a candidate indicator — physical confirmation requires expert review."
+            )
