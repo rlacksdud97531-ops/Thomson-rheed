@@ -168,45 +168,85 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
 
 
 # ── Kikuchi-like line detector ────────────────────────────────────────────────
+def _validate_kikuchi_line(flat, theta_deg, rho,
+                           roi_cx, roi_cy, w, h,
+                           samples=60, off_dist=15,
+                           min_ratio=1.4, min_abs=4.0) -> bool:
+    """검출된 라인을 실제 이미지 픽셀로 검증.
+
+    라인 위 픽셀 평균 vs 라인에서 수직으로 ±off_dist 떨어진 픽셀 평균
+    → on/off 비율이 min_ratio 미만이거나 절대값이 min_abs 미만이면 reject.
+    """
+    th = np.radians(theta_deg)
+    ct, st = np.cos(th), np.sin(th)
+    px = roi_cx + rho * ct
+    py = roi_cy - rho * st
+    dx, dy = st, ct                    # line direction
+    nx, ny = ct, -st                   # normal direction (off-line offset)
+
+    L = float(max(w, h))
+    on_vals, off_vals = [], []
+    for t in np.linspace(-L * 0.4, L * 0.4, samples):
+        x  = int(px + t * dx);  y  = int(py + t * dy)
+        if not (0 <= x < w and 0 <= y < h):
+            continue
+        on_vals.append(flat[y, x])
+        for sign in (-1, 1):
+            ox = int(x + sign * off_dist * nx)
+            oy = int(y + sign * off_dist * ny)
+            if 0 <= ox < w and 0 <= oy < h:
+                off_vals.append(flat[oy, ox])
+
+    if len(on_vals) < 15 or len(off_vals) < 15:
+        return False
+    on_mean  = float(np.mean(on_vals))
+    off_mean = float(np.mean(off_vals))
+    return on_mean > off_mean * min_ratio and on_mean > min_abs
+
+
 def detect_kikuchi(gray_pil: Image.Image) -> tuple[np.ndarray, int, bool]:
-    """Kikuchi-like band 검출 — Radon transform 방식.
+    """Kikuchi-like band 검출 — Radon + image validation.
 
     Pipeline:
-      1. Aggressive CLAHE (large tile)        ← diffuse band 대비 강화
-      2. Background subtraction (Gaussian σ ~ h/8)  ← 큰 구조만 남김
-      3. ROI crop (상하단 + 좌우 마진)
-      4. Downsample to 256px (Radon 속도)
-      5. Radon transform on diagonal angles only (15-75°, 105-165°)
-      6. Robust z-score (median + MAD) → top-K peak 검출
-      7. (theta, rho) → 원본 이미지 라인 좌표 → cv2.line으로 그리기
-
-    Radon은 line integral 기반이라 diffuse band도 잘 잡고,
-    노이즈에 강함 (적분이 noise 평균화).
+      1. CLAHE
+      2. Background subtraction (positive only — halo 제거)
+      3. Light blur로 noise 억제
+      4. Early exit: 신호 자체가 너무 약하면 종료
+      5. ROI crop + downsample
+      6. Radon (대각 각도만)
+      7. **Global** z-score + 절대 강도 threshold
+      8. Top-K + NMS
+      9. **이미지 validation**: 라인 위 픽셀이 수직 픽셀보다 충분히 밝은지
 
     Returns: (overlay_rgb, n_peaks, detected)
     """
     gray = np.array(gray_pil.convert("L"), dtype=np.uint8)
     h, w = gray.shape
 
-    # ── 1. Aggressive CLAHE (큰 tile = 큰 구조 contrast 살림) ────────────
-    clahe    = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(16, 16))
+    # ── 1. CLAHE ─────────────────────────────────────────────────────────
+    clahe    = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(16, 16))
     enhanced = clahe.apply(gray)
 
-    # ── 2. Background subtraction (large Gaussian = 배경 제거) ─────────
-    sigma     = max(15.0, h / 8.0)
-    bg        = cv2.GaussianBlur(enhanced.astype(np.float32), (0, 0), sigma)
-    flat      = enhanced.astype(np.float32) - bg
-    flat_pos  = np.clip(flat, 0, None)         # 밝은 band만 (양의 편차)
-    flat_neg  = np.clip(-flat, 0, None)        # 어두운 band (음의 편차)
-    flat_band = flat_pos + flat_neg            # 둘 다 합산 (Kikuchi는 양쪽)
+    # ── 2. Background subtraction (양의 편차만 — halo 차단) ──────────
+    sigma = max(15.0, h / 8.0)
+    bg    = cv2.GaussianBlur(enhanced.astype(np.float32), (0, 0), sigma)
+    flat  = enhanced.astype(np.float32) - bg
+    flat  = np.clip(flat, 0, None)             # 밝은 band만, 음 halo 무시
 
-    # ── 3. ROI ────────────────────────────────────────────────────────────
+    # ── 3. Light smoothing (noise 억제) ──────────────────────────────────
+    flat = cv2.GaussianBlur(flat, (5, 5), 1.2)
+
+    # ── 4. Early exit: 신호 자체가 너무 약하면 (= 빈 이미지) ────────
+    overlay_blank = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+    if float(np.percentile(flat, 99)) < 6.0:
+        return overlay_blank, 0, False
+
+    # ── 5. ROI + downsample ─────────────────────────────────────────────
     y1, y2   = int(h * 0.10), int(h * 0.90)
     x1m, x2m = int(w * 0.08), int(w * 0.92)
-    roi      = flat_band[y1:y2, x1m:x2m]
+    roi      = flat[y1:y2, x1m:x2m]
     rh, rw   = roi.shape
 
-    # ── 4. Downsample (Radon은 O(N²·n_theta), 256px가 적절) ──────────
     target = 256
     if max(rh, rw) > target:
         scale  = target / float(max(rh, rw))
@@ -216,56 +256,58 @@ def detect_kikuchi(gray_pil: Image.Image) -> tuple[np.ndarray, int, bool]:
         scale  = 1.0
         roi_sm = roi
 
-    # ── 5. Radon transform — 대각 각도만 (양방향) ────────────────────
-    theta_pos = np.linspace(15, 75,  31)       # / 방향 (positive slope)
-    theta_neg = np.linspace(105, 165, 31)      # \ 방향 (negative slope)
+    # ── 6. Radon (대각 각도만, 양방향) ────────────────────────────────
+    theta_pos = np.linspace(15, 75,  31)
+    theta_neg = np.linspace(105, 165, 31)
     theta_all = np.concatenate([theta_pos, theta_neg])
     sino      = radon(roi_sm.astype(np.float32), theta=theta_all, circle=False)
 
-    # ── 6. 각 angle column에서 robust z-score (median + MAD) ─────────
-    col_med = np.median(sino, axis=0, keepdims=True)
-    col_mad = np.median(np.abs(sino - col_med), axis=0, keepdims=True)
-    zscore  = (sino - col_med) / (col_mad + 1e-6)
+    # ── 7. Global z-score + 절대 강도 threshold ──────────────────────
+    g_med = float(np.median(sino))
+    g_mad = float(np.median(np.abs(sino - g_med))) * 1.4826   # ≈ std
+    if g_mad < 1e-6:
+        return overlay_blank, 0, False
+    z = (sino - g_med) / g_mad
 
-    # Top-K peak 검출 (non-max suppression)
-    Z_THRESH    = 5.0      # 5 MAD above median
-    MAX_PEAKS   = 6
-    NMS_RHO     = 12       # ±12 row 억제
-    NMS_THETA   = 3        # ±3 angle 억제
-    z_work = zscore.copy()
-    peaks  = []
-    sh     = sino.shape[0]
+    abs_thresh = float(np.percentile(sino, 99.5))   # 상위 0.5% 이상의 절대값
+    valid_mask = (z > 4.0) & (sino > abs_thresh)
+
+    # ── 8. Top-K + NMS ────────────────────────────────────────────────
+    MAX_PEAKS = 8
+    NMS_RHO   = 14
+    NMS_THETA = 3
+    work = np.where(valid_mask, z, -1e9).copy()
+    peaks_raw = []
+    sh = sino.shape[0]
 
     for _ in range(MAX_PEAKS):
-        idx = int(np.argmax(z_work))
-        r, c = np.unravel_index(idx, z_work.shape)
-        if z_work[r, c] < Z_THRESH:
+        idx = int(np.argmax(work))
+        r, c = np.unravel_index(idx, work.shape)
+        if work[r, c] < 4.0:
             break
         rho_small = r - sh / 2.0
-        rho       = rho_small / scale          # downsample 보정
-        peaks.append((float(theta_all[c]), float(rho), float(zscore[r, c])))
-        # NMS
+        rho       = rho_small / scale
+        peaks_raw.append((float(theta_all[c]), float(rho), float(z[r, c])))
         r0, r1 = max(0, r - NMS_RHO), min(sh, r + NMS_RHO + 1)
-        c0, c1 = max(0, c - NMS_THETA), min(z_work.shape[1], c + NMS_THETA + 1)
-        z_work[r0:r1, c0:c1] = -1e9
+        c0, c1 = max(0, c - NMS_THETA), min(work.shape[1], c + NMS_THETA + 1)
+        work[r0:r1, c0:c1] = -1e9
 
-    # ── 7. (theta, rho) → 라인 endpoint → 오버레이에 그리기 ──────────
-    overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
-
-    # ROI 중심 (원본 좌표)
+    # ── 9. Image-domain validation (False positive 차단) ─────────────
     roi_cx = x1m + rw / 2.0
     roi_cy = y1  + rh / 2.0
-    L      = float(max(w, h)) * 1.5
+    peaks  = [
+        (th, rh_, z_) for (th, rh_, z_) in peaks_raw
+        if _validate_kikuchi_line(flat, th, rh_, roi_cx, roi_cy, w, h)
+    ]
 
+    # ── 10. 오버레이 ────────────────────────────────────────────────────
+    overlay = overlay_blank
+    L = float(max(w, h)) * 1.5
     for theta_deg, rho, _z in peaks:
-        # skimage radon 규약: theta 회전 후 column 합 = 그 angle column = projection
-        # → line 방향: (sin θ, cos θ),  normal: (cos θ, -sin θ)
         th = np.radians(theta_deg)
         ct, st = np.cos(th), np.sin(th)
-        # Foot of perpendicular from ROI center
         px = roi_cx + rho * ct
         py = roi_cy - rho * st
-        # Line direction (perpendicular to normal)
         dx, dy = st, ct
         p1 = (int(px - L * dx), int(py - L * dy))
         p2 = (int(px + L * dx), int(py + L * dy))
