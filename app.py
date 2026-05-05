@@ -189,14 +189,15 @@ def detect_kikuchi(gray_pil: Image.Image) -> tuple[np.ndarray, int, bool]:
     clahe    = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
 
-    # ROI: 상단 10%, 하단 10% 제외
+    # ROI: 상단 10%, 하단 10%, 좌우 8% 제외 (원형 스크린 프레임 오검출 방지)
     y1, y2   = int(h * 0.10), int(h * 0.90)
+    x1m, x2m = int(w * 0.08), int(w * 0.92)
 
     # ── Track 1: Hough line detection ────────────────────────────────────────
     # Bilateral filter — edge 보존하면서 noise 제거 (Gaussian보다 diffuse band에 유리)
     bilateral = cv2.bilateralFilter(enhanced, d=9, sigmaColor=75, sigmaSpace=75)
     edges     = cv2.Canny(bilateral, 15, 50)          # 낮은 threshold (diffuse용)
-    roi_edges = edges[y1:y2, :]
+    roi_edges = edges[y1:y2, x1m:x2m]                # x 마진 적용
 
     min_len = max(20, int(0.08 * min(h, w)))          # 더 짧은 선도 검출
     lines   = cv2.HoughLinesP(
@@ -209,6 +210,8 @@ def detect_kikuchi(gray_pil: Image.Image) -> tuple[np.ndarray, int, bool]:
     if lines is not None:
         for seg in lines:
             x1, ly1, x2, ly2 = seg[0]
+            # x 좌표를 원본 이미지 기준으로 복원
+            x1 += x1m; x2 += x1m
             dx, dy = x2 - x1, ly2 - ly1
             angle  = abs(np.degrees(np.arctan2(dy, dx)))
             if angle > 90:
@@ -216,7 +219,7 @@ def detect_kikuchi(gray_pil: Image.Image) -> tuple[np.ndarray, int, bool]:
             if 15 < angle < 75:             # 수평·수직 제외, 대각선만
                 kikuchi.append((x1, ly1 + y1, x2, ly2 + y1))
 
-    hough_detected = len(kikuchi) >= 2
+    hough_detected = len(kikuchi) >= 1      # 1개 이상이면 detected
 
     # ── Track 2: Gradient direction analysis ─────────────────────────────────
     # Sobel gradient — Kikuchi band = 대각 방향 intensity gradient
@@ -232,7 +235,7 @@ def detect_kikuchi(gray_pil: Image.Image) -> tuple[np.ndarray, int, bool]:
     strong_mask  = mag > thresh
     diag_mask    = (ang > 15) & (ang < 75)
     diag_ratio   = float((strong_mask & diag_mask).mean())
-    grad_detected = diag_ratio > 0.12    # 강한 gradient의 12% 이상이 대각 방향
+    grad_detected = diag_ratio > 0.09    # 강한 gradient의 9% 이상이 대각 방향
 
     detected = hough_detected or grad_detected
 
