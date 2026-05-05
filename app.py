@@ -168,36 +168,43 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
 
 # ── Kikuchi-like line detector ────────────────────────────────────────────────
 def detect_kikuchi(gray_pil: Image.Image) -> tuple[np.ndarray, int, bool]:
-    """CLAHE → Canny → Hough 로 대각선 라인(Kikuchi-like 후보)을 검출한다.
+    """Kikuchi-like band 검출 — 2-track 방식.
+
+    Track 1 (Hough): CLAHE → Bilateral → Canny → Hough 로 대각선 라인 세그먼트 검출
+    Track 2 (Gradient): Sobel gradient direction 분석으로 대각 gradient 비율 측정
+
+    Kikuchi bands = diffuse intensity gradients이므로 낮은 threshold 사용.
+    둘 중 하나라도 감지되면 detected=True.
 
     gray_pil : 전처리된 grayscale PIL 이미지 (full-res, before 260×260 resize)
-    Returns  : (overlay_rgb: np.ndarray uint8, n_lines: int, detected: bool)
+    Returns  : (overlay_rgb: np.ndarray uint8, n_hough_lines: int, detected: bool)
 
-    ⚠️ 이것은 후보 검출 (geometry 기반)이며 물리적 Kikuchi 확정이 아님.
+    ⚠️ 후보 검출 (geometry 기반) — 물리적 Kikuchi 확정이 아님.
     """
     gray = np.array(gray_pil.convert("L"), dtype=np.uint8)
     h, w = gray.shape
 
-    # CLAHE — 흐릿한 band도 보이게 대비 강화
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    # ── 공통 전처리 ──────────────────────────────────────────────────────────
+    # Aggressive CLAHE — diffuse band 강화
+    clahe    = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
 
-    # Blur → Canny edges
-    blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
-    edges   = cv2.Canny(blurred, 40, 120)
+    # ROI: 상단 10%, 하단 10% 제외
+    y1, y2   = int(h * 0.10), int(h * 0.90)
 
-    # 분석 ROI: 상단 15%, 하단 10% 제외 (노이즈·가장자리 반사 회피)
-    y1, y2   = int(h * 0.15), int(h * 0.90)
+    # ── Track 1: Hough line detection ────────────────────────────────────────
+    # Bilateral filter — edge 보존하면서 noise 제거 (Gaussian보다 diffuse band에 유리)
+    bilateral = cv2.bilateralFilter(enhanced, d=9, sigmaColor=75, sigmaSpace=75)
+    edges     = cv2.Canny(bilateral, 15, 50)          # 낮은 threshold (diffuse용)
     roi_edges = edges[y1:y2, :]
 
-    # Hough probabilistic line transform
-    min_len = max(25, int(0.12 * min(h, w)))
+    min_len = max(20, int(0.08 * min(h, w)))          # 더 짧은 선도 검출
     lines   = cv2.HoughLinesP(
         roi_edges, rho=1, theta=np.pi / 180,
-        threshold=35, minLineLength=min_len, maxLineGap=12,
+        threshold=15,                                  # 낮은 vote threshold
+        minLineLength=min_len, maxLineGap=30,          # 큰 gap 허용
     )
 
-    # 대각선만 Kikuchi 후보로 인정 (15–75°, 수평·수직 제외)
     kikuchi = []
     if lines is not None:
         for seg in lines:
@@ -206,15 +213,34 @@ def detect_kikuchi(gray_pil: Image.Image) -> tuple[np.ndarray, int, bool]:
             angle  = abs(np.degrees(np.arctan2(dy, dx)))
             if angle > 90:
                 angle = 180 - angle
-            if 15 < angle < 75:
+            if 15 < angle < 75:             # 수평·수직 제외, 대각선만
                 kikuchi.append((x1, ly1 + y1, x2, ly2 + y1))
 
-    # 오버레이: 원본 grayscale + 빨간 라인
+    hough_detected = len(kikuchi) >= 2
+
+    # ── Track 2: Gradient direction analysis ─────────────────────────────────
+    # Sobel gradient — Kikuchi band = 대각 방향 intensity gradient
+    roi_enh = enhanced[y1:y2, :].astype(np.float32)
+    gx      = cv2.Sobel(roi_enh, cv2.CV_64F, 1, 0, ksize=3)
+    gy      = cv2.Sobel(roi_enh, cv2.CV_64F, 0, 1, ksize=3)
+    mag     = np.sqrt(gx ** 2 + gy ** 2)
+    ang     = np.abs(np.degrees(np.arctan2(gy, gx)))
+    ang[ang > 90] = 180 - ang[ang > 90]
+
+    # 상위 20% gradient 중 대각 방향 비율
+    thresh       = np.percentile(mag, 80)
+    strong_mask  = mag > thresh
+    diag_mask    = (ang > 15) & (ang < 75)
+    diag_ratio   = float((strong_mask & diag_mask).mean())
+    grad_detected = diag_ratio > 0.12    # 강한 gradient의 12% 이상이 대각 방향
+
+    detected = hough_detected or grad_detected
+
+    # ── 오버레이: grayscale + 빨간 Hough 라인 ────────────────────────────────
     overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
     for (x1, ly1, x2, ly2) in kikuchi:
         cv2.line(overlay, (x1, ly1), (x2, ly2), (220, 60, 60), 2)
 
-    detected = len(kikuchi) >= 2   # 라인 2개 이상일 때 "detected"
     return overlay, len(kikuchi), detected
 
 
@@ -353,15 +379,16 @@ for f in uploaded:
         with c_kk:
             st.image(
                 kk_overlay,
-                caption="Red lines = diagonal line candidates",
+                caption=f"Red lines = Hough diagonal candidates ({kk_count} line(s))",
                 use_container_width=True,
             )
         with c_kk_info:
             if kk_detected:
-                st.success(f"✅ {kk_count} candidate line(s) detected")
+                st.success("✅ Kikuchi-like features detected")
             else:
-                st.info(f"⚪ Not detected ({kk_count} line(s) found)")
+                st.info("⚪ Not detected")
             st.caption(
-                "Detection is based on diagonal line geometry (Hough transform). "
-                "This is a candidate indicator — physical confirmation requires expert review."
+                "Two-track detection: Hough line geometry + "
+                "Sobel gradient direction analysis. "
+                "Candidate indicator only — physical confirmation requires expert review."
             )
