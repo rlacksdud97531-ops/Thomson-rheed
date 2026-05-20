@@ -422,32 +422,11 @@ for f in uploaded:
                 )
 
             with c_img:
-                # Draw selections on a copy
-                display = img.copy().convert("RGB")
-                drw     = ImageDraw.Draw(display)
-
-                # 1) LINE first (so circles cap nicely on top)
-                #    white outline for contrast on dark backgrounds, then red core
-                if p1 is not None and p2 is not None:
-                    drw.line([p1[0], p1[1], p2[0], p2[1]],
-                             fill="white", width=8)
-                    drw.line([p1[0], p1[1], p2[0], p2[1]],
-                             fill="red", width=4)
-
-                # 2) Circles on top with filled red center + white outer ring
-                for pt, label in [(p1, "1"), (p2, "2")]:
-                    if pt is None:
-                        continue
-                    x, y = pt
-                    # white outer ring
-                    drw.ellipse([x-11, y-11, x+11, y+11],
-                                outline="white", width=3)
-                    # red filled inner
-                    drw.ellipse([x-7, y-7, x+7, y+7],
-                                fill="red", outline="white", width=1)
-
+                # Click target: 원본 이미지 그대로 사용 (markers 그리지 않음)
+                #   → streamlit_image_coordinates 의 client-side 이미지 캐싱 문제 회피
                 value = streamlit_image_coordinates(
-                    display, key=f"ls_clicker_{f.name}",
+                    img.convert("RGB"),
+                    key=f"ls_clicker_{f.name}",
                     use_column_width=True,
                 )
                 # Detect new click (returned value persists; compare to last seen)
@@ -459,6 +438,29 @@ for f in uploaded:
                     elif p2 is None:
                         st.session_state[sk_p2] = new_pt
                     st.rerun()
+
+                # Preview image (별도로 markers + line 그려서 보여줌)
+                if p1 is not None or p2 is not None:
+                    preview = img.copy().convert("RGB")
+                    pdrw    = ImageDraw.Draw(preview)
+
+                    # 1) LINE (white outline + red core)
+                    if p1 is not None and p2 is not None:
+                        pdrw.line([p1, p2], fill="white", width=8)
+                        pdrw.line([p1, p2], fill="red",   width=4)
+
+                    # 2) Markers (white ring + red filled center)
+                    for pt in (p1, p2):
+                        if pt is None:
+                            continue
+                        x, y = pt
+                        pdrw.ellipse([x-11, y-11, x+11, y+11],
+                                     outline="white", width=3)
+                        pdrw.ellipse([x-7,  y-7,  x+7,  y+7],
+                                     fill="red", outline="white", width=1)
+
+                    st.image(preview, caption="Preview",
+                             use_container_width=True)
 
             # Profile + fit
             if p1 is not None and p2 is not None:
