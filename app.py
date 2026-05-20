@@ -7,10 +7,12 @@ import os
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+from streamlit_image_coordinates import streamlit_image_coordinates
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -165,6 +167,94 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
         return "—"
 
 
+# ── Line Scan Tool ─────────────────────────────────────────────────────────────
+def gaussian(x, height, center, fwhm, offset):
+    """단일 Gaussian: peak height + FWHM 파라미터화."""
+    if fwhm <= 0:
+        return np.full_like(x, offset, dtype=np.float64)
+    sigma = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    return height * np.exp(-(x - center) ** 2 / (2.0 * sigma ** 2)) + offset
+
+
+def line_scan(img_array: np.ndarray, p1: tuple, p2: tuple, width: int = 0):
+    """이미지 위 p1→p2 라인 따라 intensity profile 추출.
+
+    img_array : 2D grayscale numpy array
+    p1, p2    : (x, y) — 픽셀 좌표
+    width     : 라인 수직 방향 적분 폭 (±픽셀). 0 = 단일 픽셀 라인.
+
+    Returns: (distances_px, intensities)
+    """
+    x0, y0 = p1
+    x1, y1 = p2
+    length_px = float(np.hypot(x1 - x0, y1 - y0))
+    if length_px < 1.0:
+        return np.array([]), np.array([])
+
+    n = max(int(length_px), 50)
+    xs = np.linspace(x0, x1, n)
+    ys = np.linspace(y0, y1, n)
+
+    h, w_img = img_array.shape
+
+    if width == 0:
+        xs_c = np.clip(xs.astype(int), 0, w_img - 1)
+        ys_c = np.clip(ys.astype(int), 0, h - 1)
+        intensities = img_array[ys_c, xs_c].astype(np.float64)
+    else:
+        # 라인의 단위 수직 벡터
+        dx, dy = x1 - x0, y1 - y0
+        perp_x, perp_y = -dy / length_px, dx / length_px
+        intensities = np.zeros(n, dtype=np.float64)
+        for k in range(-width, width + 1):
+            xs_w = np.clip((xs + k * perp_x).astype(int), 0, w_img - 1)
+            ys_w = np.clip((ys + k * perp_y).astype(int), 0, h - 1)
+            intensities += img_array[ys_w, xs_w].astype(np.float64)
+        intensities /= float(2 * width + 1)
+
+    distances = np.linspace(0.0, length_px, n)
+    return distances, intensities
+
+
+def fit_gaussian_profile(distances: np.ndarray, intensities: np.ndarray):
+    """Profile에 단일 Gaussian fit. scipy.curve_fit + bounds 사용.
+
+    Returns: dict {height, center, fwhm, offset, r2} or None on failure.
+    """
+    if len(distances) < 5:
+        return None
+
+    x = distances.astype(np.float64)
+    y = intensities.astype(np.float64)
+
+    y_min, y_max = float(y.min()), float(y.max())
+    height0 = y_max - y_min
+    if height0 < 1e-6:
+        return None
+    center0 = float(x[int(np.argmax(y))])
+    fwhm0   = float(x.max() - x.min()) / 4.0
+    offset0 = y_min
+
+    try:
+        popt, _ = curve_fit(
+            gaussian, x, y,
+            p0=[height0, center0, fwhm0, offset0],
+            bounds=([0.0, float(x.min()), 0.5, y_min - 1.0],
+                    [np.inf, float(x.max()), float(x.max() - x.min()), y_max + 1.0]),
+            maxfev=2000,
+        )
+    except (RuntimeError, ValueError):
+        return None
+
+    height, center, fwhm, offset = (float(v) for v in popt)
+    y_fit  = gaussian(x, *popt)
+    ss_res = float(np.sum((y - y_fit) ** 2))
+    ss_tot = float(np.sum((y - y.mean()) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 1e-9 else 0.0
+    return {"height": height, "center": center, "fwhm": fwhm,
+            "offset": offset, "r2": r2}
+
+
 # ── Probability bar chart ──────────────────────────────────────────────────────
 def plot_probs(probs):
     fig, ax = plt.subplots(figsize=(6, 2.8))
@@ -291,3 +381,108 @@ for f in uploaded:
                     f'</div>',
                     unsafe_allow_html=True,
                 )
+
+        # ── Line Scan Tool ─────────────────────────────────────────────────────
+        with st.expander("📏 Line Scan Tool — measure intensity profile", expanded=False):
+            sk_p1   = f"ls_p1_{f.name}"
+            sk_p2   = f"ls_p2_{f.name}"
+            sk_last = f"ls_last_{f.name}"
+            for k in (sk_p1, sk_p2, sk_last):
+                if k not in st.session_state:
+                    st.session_state[k] = None
+
+            p1 = st.session_state[sk_p1]
+            p2 = st.session_state[sk_p2]
+
+            c_ctrl, c_img = st.columns([1, 2])
+
+            with c_ctrl:
+                st.markdown("**How to use:**")
+                if p1 is None:
+                    st.info("Click **first point** on image →")
+                elif p2 is None:
+                    st.info("Click **second point** →")
+                else:
+                    st.success(
+                        f"Line: ({p1[0]}, {p1[1]}) → ({p2[0]}, {p2[1]})\n\n"
+                        f"Length: {np.hypot(p2[0]-p1[0], p2[1]-p1[1]):.1f} px"
+                    )
+
+                if st.button("🔄 Reset", key=f"ls_reset_{f.name}"):
+                    st.session_state[sk_p1]   = None
+                    st.session_state[sk_p2]   = None
+                    st.session_state[sk_last] = None
+                    st.rerun()
+
+                width_px = st.slider(
+                    "Integration width (±px)",
+                    min_value=0, max_value=20, value=3,
+                    key=f"ls_w_{f.name}",
+                    help="Perpendicular pixels to integrate (smooths noise)",
+                )
+
+            with c_img:
+                # Draw selections on a copy
+                display = img.copy().convert("RGB")
+                drw     = ImageDraw.Draw(display)
+                if p1 is not None:
+                    drw.ellipse([p1[0]-8, p1[1]-8, p1[0]+8, p1[1]+8],
+                                outline="red", width=3)
+                if p2 is not None:
+                    drw.ellipse([p2[0]-8, p2[1]-8, p2[0]+8, p2[1]+8],
+                                outline="red", width=3)
+                    if p1 is not None:
+                        drw.line([p1[0], p1[1], p2[0], p2[1]],
+                                 fill="red", width=3)
+
+                value = streamlit_image_coordinates(
+                    display, key=f"ls_clicker_{f.name}",
+                    use_column_width=True,
+                )
+                # Detect new click (returned value persists; compare to last seen)
+                if value is not None and value != st.session_state[sk_last]:
+                    st.session_state[sk_last] = value
+                    new_pt = (int(value["x"]), int(value["y"]))
+                    if p1 is None:
+                        st.session_state[sk_p1] = new_pt
+                    elif p2 is None:
+                        st.session_state[sk_p2] = new_pt
+                    st.rerun()
+
+            # Profile + fit
+            if p1 is not None and p2 is not None:
+                gray_arr = np.array(img.convert("L"), dtype=np.float64)
+                distances, intensities = line_scan(gray_arr, p1, p2, width=width_px)
+
+                if len(distances) > 0:
+                    fit = fit_gaussian_profile(distances, intensities)
+
+                    fig, ax = plt.subplots(figsize=(8, 3))
+                    ax.plot(distances, intensities, "b-", linewidth=1.2,
+                            label="Profile")
+                    if fit is not None:
+                        x_fit = np.linspace(distances.min(), distances.max(), 200)
+                        y_fit = gaussian(x_fit, fit["height"], fit["center"],
+                                         fit["fwhm"], fit["offset"])
+                        ax.plot(x_fit, y_fit, "r--", linewidth=1.6,
+                                label=f"Gaussian (R²={fit['r2']:.3f})")
+                    ax.set_xlabel("Distance along line (px)")
+                    ax.set_ylabel("Intensity")
+                    ax.grid(True, alpha=0.3)
+                    ax.legend(loc="upper right", fontsize=9)
+                    ax.spines[["top", "right"]].set_visible(False)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+
+                    if fit is not None:
+                        m1, m2, m3, m4 = st.columns(4)
+                        m1.metric("Peak position", f"{fit['center']:.1f} px")
+                        m2.metric("FWHM",          f"{fit['fwhm']:.1f} px")
+                        m3.metric("Peak height",   f"{fit['height']:.0f}")
+                        m4.metric("Fit R²",        f"{fit['r2']:.3f}")
+                    else:
+                        st.warning(
+                            "Could not fit Gaussian — try different line "
+                            "or increase integration width."
+                        )
