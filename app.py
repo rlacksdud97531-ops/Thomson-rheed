@@ -432,7 +432,23 @@ for f in uploaded:
                 # Detect new click (returned value persists; compare to last seen)
                 if value is not None and value != st.session_state[sk_last]:
                     st.session_state[sk_last] = value
-                    new_pt = (int(value["x"]), int(value["y"]))
+
+                    # ── 좌표 스케일링: 표시 좌표 → 원본 픽셀 좌표 ───────────
+                    # streamlit_image_coordinates 가 use_column_width=True 일 때
+                    # 표시된(축소된) 이미지 기준 좌표를 반환함. 원본 좌표로 변환.
+                    natural_w, natural_h = img.size
+                    disp_w = value.get("width",  natural_w)
+                    disp_h = value.get("height", natural_h)
+                    if disp_w > 0 and disp_h > 0:
+                        nx = int(round(value["x"] * natural_w / disp_w))
+                        ny = int(round(value["y"] * natural_h / disp_h))
+                    else:
+                        nx = int(value["x"]);  ny = int(value["y"])
+                    # Clamp to image bounds
+                    nx = max(0, min(natural_w - 1, nx))
+                    ny = max(0, min(natural_h - 1, ny))
+                    new_pt = (nx, ny)
+
                     if p1 is None:
                         st.session_state[sk_p1] = new_pt
                     elif p2 is None:
