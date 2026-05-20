@@ -414,12 +414,9 @@ for f in uploaded:
                     st.session_state[sk_last] = None
                     st.rerun()
 
-                width_px = st.slider(
-                    "Integration width (±px)",
-                    min_value=0, max_value=20, value=3,
-                    key=f"ls_w_{f.name}",
-                    help="Perpendicular pixels to integrate (smooths noise)",
-                )
+                # Integration width: 라인 수직 방향 평균 픽셀 수
+                # (노이즈 완화 — 3px 정도가 일반적인 sweet spot)
+                width_px = 3
 
             with c_img:
                 # 원본 이미지 위에 markers + line 직접 그림
