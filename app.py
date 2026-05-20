@@ -422,20 +422,37 @@ for f in uploaded:
                 )
 
             with c_img:
-                # Click target: 원본 이미지 그대로 사용 (markers 그리지 않음)
-                #   → streamlit_image_coordinates 의 client-side 이미지 캐싱 문제 회피
+                # 원본 이미지 위에 markers + line 직접 그림
+                display = img.copy().convert("RGB")
+                drw     = ImageDraw.Draw(display)
+
+                # 1) LINE (white outline + red core) — circles 아래
+                if p1 is not None and p2 is not None:
+                    drw.line([p1, p2], fill="white", width=8)
+                    drw.line([p1, p2], fill="red",   width=4)
+
+                # 2) Markers on top
+                for pt in (p1, p2):
+                    if pt is None:
+                        continue
+                    x, y = pt
+                    drw.ellipse([x-11, y-11, x+11, y+11],
+                                outline="white", width=3)
+                    drw.ellipse([x-7,  y-7,  x+7,  y+7],
+                                fill="red", outline="white", width=1)
+
+                # State 변화마다 key 다르게 → client-side 이미지 cache 무효화
+                state_id = f"{p1}_{p2}"
                 value = streamlit_image_coordinates(
-                    img.convert("RGB"),
-                    key=f"ls_clicker_{f.name}",
+                    display,
+                    key=f"ls_clicker_{f.name}_{state_id}",
                     use_column_width=True,
                 )
-                # Detect new click (returned value persists; compare to last seen)
+                # Detect new click (key 바뀌면 value 가 None 으로 reset 됨 → 안전)
                 if value is not None and value != st.session_state[sk_last]:
                     st.session_state[sk_last] = value
 
                     # ── 좌표 스케일링: 표시 좌표 → 원본 픽셀 좌표 ───────────
-                    # streamlit_image_coordinates 가 use_column_width=True 일 때
-                    # 표시된(축소된) 이미지 기준 좌표를 반환함. 원본 좌표로 변환.
                     natural_w, natural_h = img.size
                     disp_w = value.get("width",  natural_w)
                     disp_h = value.get("height", natural_h)
@@ -444,7 +461,6 @@ for f in uploaded:
                         ny = int(round(value["y"] * natural_h / disp_h))
                     else:
                         nx = int(value["x"]);  ny = int(value["y"])
-                    # Clamp to image bounds
                     nx = max(0, min(natural_w - 1, nx))
                     ny = max(0, min(natural_h - 1, ny))
                     new_pt = (nx, ny)
@@ -454,29 +470,6 @@ for f in uploaded:
                     elif p2 is None:
                         st.session_state[sk_p2] = new_pt
                     st.rerun()
-
-                # Preview image (별도로 markers + line 그려서 보여줌)
-                if p1 is not None or p2 is not None:
-                    preview = img.copy().convert("RGB")
-                    pdrw    = ImageDraw.Draw(preview)
-
-                    # 1) LINE (white outline + red core)
-                    if p1 is not None and p2 is not None:
-                        pdrw.line([p1, p2], fill="white", width=8)
-                        pdrw.line([p1, p2], fill="red",   width=4)
-
-                    # 2) Markers (white ring + red filled center)
-                    for pt in (p1, p2):
-                        if pt is None:
-                            continue
-                        x, y = pt
-                        pdrw.ellipse([x-11, y-11, x+11, y+11],
-                                     outline="white", width=3)
-                        pdrw.ellipse([x-7,  y-7,  x+7,  y+7],
-                                     fill="red", outline="white", width=1)
-
-                    st.image(preview, caption="Preview",
-                             use_container_width=True)
 
             # Profile + fit
             if p1 is not None and p2 is not None:
