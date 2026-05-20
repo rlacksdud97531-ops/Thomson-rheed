@@ -425,15 +425,26 @@ for f in uploaded:
                 # Draw selections on a copy
                 display = img.copy().convert("RGB")
                 drw     = ImageDraw.Draw(display)
-                if p1 is not None:
-                    drw.ellipse([p1[0]-8, p1[1]-8, p1[0]+8, p1[1]+8],
-                                outline="red", width=3)
-                if p2 is not None:
-                    drw.ellipse([p2[0]-8, p2[1]-8, p2[0]+8, p2[1]+8],
-                                outline="red", width=3)
-                    if p1 is not None:
-                        drw.line([p1[0], p1[1], p2[0], p2[1]],
-                                 fill="red", width=3)
+
+                # 1) LINE first (so circles cap nicely on top)
+                #    white outline for contrast on dark backgrounds, then red core
+                if p1 is not None and p2 is not None:
+                    drw.line([p1[0], p1[1], p2[0], p2[1]],
+                             fill="white", width=8)
+                    drw.line([p1[0], p1[1], p2[0], p2[1]],
+                             fill="red", width=4)
+
+                # 2) Circles on top with filled red center + white outer ring
+                for pt, label in [(p1, "1"), (p2, "2")]:
+                    if pt is None:
+                        continue
+                    x, y = pt
+                    # white outer ring
+                    drw.ellipse([x-11, y-11, x+11, y+11],
+                                outline="white", width=3)
+                    # red filled inner
+                    drw.ellipse([x-7, y-7, x+7, y+7],
+                                fill="red", outline="white", width=1)
 
                 value = streamlit_image_coordinates(
                     display, key=f"ls_clicker_{f.name}",
