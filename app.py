@@ -167,21 +167,87 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
 
 
 # ── Peak detection (used by Spot Box Tool) ─────────────────────────────────────
+def _compute_fwhm(distances: np.ndarray, y_smooth: np.ndarray,
+                  peak_idx: int, baseline: float) -> dict:
+    """Peak에서 양쪽으로 half-max 만나는 지점까지 걸어가서 FWHM 계산.
+
+    Sub-pixel 정밀도: half-max 교차 지점은 선형 보간.
+    인접 peak 침범 방지: intensity가 다시 상승하면 그 직전 valley를 경계로.
+
+    Returns: dict — left_x, right_x, fwhm, half_max
+    """
+    n        = len(y_smooth)
+    peak_y   = float(y_smooth[peak_idx])
+    half_max = baseline + (peak_y - baseline) / 2.0
+
+    # ── 왼쪽 ────────────────────────────────────────────────────────
+    left_x  = float(distances[0])
+    prev_y  = peak_y
+    for i in range(peak_idx - 1, -1, -1):
+        yi = float(y_smooth[i])
+        if yi <= half_max:
+            # 선형 보간: y[i] (below) → y[i+1] (above) 사이에서 half_max 교차
+            y1, y2 = yi, float(y_smooth[i + 1])
+            x1, x2 = float(distances[i]), float(distances[i + 1])
+            if abs(y2 - y1) > 1e-9:
+                t = (half_max - y1) / (y2 - y1)
+                left_x = x1 + t * (x2 - x1)
+            else:
+                left_x = x1
+            break
+        if yi > prev_y:
+            # 다시 상승 → 인접 peak 침범. 직전 valley 지점을 경계로.
+            left_x = float(distances[i + 1])
+            break
+        prev_y = yi
+
+    # ── 오른쪽 ──────────────────────────────────────────────────────
+    right_x = float(distances[-1])
+    prev_y  = peak_y
+    for i in range(peak_idx + 1, n):
+        yi = float(y_smooth[i])
+        if yi <= half_max:
+            y1, y2 = float(y_smooth[i - 1]), yi
+            x1, x2 = float(distances[i - 1]), float(distances[i])
+            if abs(y2 - y1) > 1e-9:
+                t = (half_max - y1) / (y2 - y1)
+                right_x = x1 + t * (x2 - x1)
+            else:
+                right_x = x2
+            break
+        if yi > prev_y:
+            right_x = float(distances[i - 1])
+            break
+        prev_y = yi
+
+    return {
+        "left_x":   left_x,
+        "right_x":  right_x,
+        "fwhm":     right_x - left_x,
+        "half_max": half_max,
+    }
+
+
 def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
                  min_height_ratio:     float = 0.25,
                  min_prominence_ratio: float = 0.15,
                  min_dist_px:          float = 20.0) -> list:
-    """Profile에서 모든 의미있는 local peak 검출 (prominence 기반).
+    """Profile에서 모든 의미있는 local peak 검출 + 각 peak의 FWHM 계산.
 
     Args:
         distances             : 1D distance array (px)
         intensities           : 1D intensity array
         min_height_ratio      : peak 최소 절대 높이 (동적 범위 비율)
-        min_prominence_ratio  : peak 사이 valley 깊이 (동적 범위 비율) —
-                                같은 봉우리의 sub-peak 거름
+        min_prominence_ratio  : peak 사이 valley 깊이 (동적 범위 비율)
         min_dist_px           : peak 간 최소 거리 (px)
 
-    Returns: list of (distance, intensity) tuples, 위치 순.
+    Returns: list of dicts (위치 순) with keys:
+        x          : peak 위치 (px)
+        y          : peak intensity (원본)
+        fwhm       : FWHM (px)
+        fwhm_left  : FWHM 왼쪽 경계 x (px)
+        fwhm_right : FWHM 오른쪽 경계 x (px)
+        half_max   : 반높이 강도 (시각화용)
     """
     n = len(intensities)
     if n < 5:
@@ -196,15 +262,15 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
     y_smooth = np.convolve(y, np.ones(k) / k, mode="same")
 
     # 동적 threshold
-    baseline = float(np.percentile(y_smooth, 20))
-    peak_max = float(y_smooth.max())
+    baseline  = float(np.percentile(y_smooth, 20))
+    peak_max  = float(y_smooth.max())
     dyn_range = peak_max - baseline
     if dyn_range < 1e-6:
         return []
-    height_thresh   = baseline + dyn_range * min_height_ratio
-    min_prominence  = dyn_range * min_prominence_ratio
+    height_thresh  = baseline + dyn_range * min_height_ratio
+    min_prominence = dyn_range * min_prominence_ratio
 
-    # Strict local maxima (>, 평탄 정상부 미세 진동 회피)
+    # Strict local maxima
     candidates = [
         i for i in range(1, n - 1)
         if y_smooth[i] > y_smooth[i - 1]
@@ -214,29 +280,38 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
     if not candidates:
         return []
 
-    # ── Prominence 필터 ──────────────────────────────────────────────
-    # 높이 내림차순으로 검토하면서, 이미 accept된 peak과 사이의 valley가
-    # 충분히 깊은지 확인. 얕으면 같은 봉우리의 sub-peak → 거름.
+    # Prominence 필터
     candidates.sort(key=lambda i: -y_smooth[i])
     accepted = []
     for c in candidates:
-        # 거리 필터
         if any(abs(distances[c] - distances[a]) < min_dist_px for a in accepted):
             continue
-        # Prominence 필터 (accept된 peak과 사이의 가장 깊은 valley 검사)
         is_isolated = True
         for a in accepted:
             lo, hi = min(c, a), max(c, a)
             valley = float(y_smooth[lo:hi + 1].min())
             smaller_top = min(y_smooth[c], y_smooth[a])
             if smaller_top - valley < min_prominence:
-                is_isolated = False  # 같은 봉우리
+                is_isolated = False
                 break
         if is_isolated:
             accepted.append(c)
 
     accepted.sort(key=lambda i: distances[i])
-    return [(float(distances[i]), float(y[i])) for i in accepted]
+
+    # 각 accepted peak에 대해 FWHM 계산
+    peaks = []
+    for idx in accepted:
+        fw = _compute_fwhm(distances, y_smooth, idx, baseline)
+        peaks.append({
+            "x":          float(distances[idx]),
+            "y":          float(y[idx]),
+            "fwhm":       fw["fwhm"],
+            "fwhm_left":  fw["left_x"],
+            "fwhm_right": fw["right_x"],
+            "half_max":   fw["half_max"],
+        })
+    return peaks
 
 
 # ── Probability bar chart ──────────────────────────────────────────────────────
@@ -463,14 +538,31 @@ for f in uploaded:
                     ax.plot(distances, profile, "b-", linewidth=1.2,
                             label="Profile (avg)")
                     if peaks:
-                        px = [p[0] for p in peaks]
-                        py = [p[1] for p in peaks]
+                        px = [p["x"] for p in peaks]
+                        py = [p["y"] for p in peaks]
+                        # FWHM 경계선 (반높이 가로 막대) — 진한 빨강
+                        for p in peaks:
+                            ax.hlines(
+                                y=p["half_max"],
+                                xmin=p["fwhm_left"], xmax=p["fwhm_right"],
+                                colors="red", linewidth=2.5, alpha=0.85,
+                            )
+                            # FWHM 양끝 짧은 수직 tick
+                            tick = (peaks[0]["y"] - p["half_max"]) * 0.05 + 1
+                            ax.vlines(x=[p["fwhm_left"], p["fwhm_right"]],
+                                      ymin=p["half_max"] - tick,
+                                      ymax=p["half_max"] + tick,
+                                      colors="red", linewidth=2.0, alpha=0.85)
+                        # Peak 점선 (위치 표시) + 빨간 점
+                        for x_p in px:
+                            ax.axvline(x=x_p, color="red", linestyle=":",
+                                       linewidth=0.8, alpha=0.4)
                         ax.plot(px, py, "ro", markersize=8,
                                 markeredgecolor="white", markeredgewidth=1.5,
                                 label=f"Peaks ({len(peaks)})")
-                        for x_p in px:
-                            ax.axvline(x=x_p, color="red", linestyle=":",
-                                       linewidth=0.8, alpha=0.5)
+                        # FWHM legend entry (dummy line)
+                        ax.plot([], [], "r-", linewidth=2.5,
+                                label="FWHM (at half-max)")
                     ax.set_xlabel(
                         f"Distance from left edge of box (px)  ·  "
                         f"Box: {x1 - x0} × {y1 - y0}"
@@ -483,38 +575,47 @@ for f in uploaded:
                     st.pyplot(fig)
                     plt.close(fig)
 
-                    # Metrics (Line Scan과 동일)
+                    # ── Metrics ──────────────────────────────────────────
                     if len(peaks) == 0:
                         st.warning(
                             "No peaks detected — try larger box width or "
                             "move center."
                         )
                     elif len(peaks) == 1:
+                        p0 = peaks[0]
                         st.info(
                             f"**1 peak detected** at position "
-                            f"**{peaks[0][0]:.1f} px** (intensity "
-                            f"{peaks[0][1]:.0f}). Increase box width to "
-                            f"capture more streaks."
+                            f"**{p0['x']:.1f} px** (intensity {p0['y']:.0f}, "
+                            f"FWHM **{p0['fwhm']:.1f} px**). Increase box "
+                            f"width to capture more streaks."
                         )
                     else:
-                        positions = [p[0] for p in peaks]
+                        positions = [p["x"]    for p in peaks]
+                        fwhms     = [p["fwhm"] for p in peaks]
                         spacings  = [positions[j + 1] - positions[j]
                                      for j in range(len(positions) - 1)]
-                        mean_sp = float(np.mean(spacings))
-                        std_sp  = float(np.std(spacings))
+                        mean_sp   = float(np.mean(spacings))
+                        std_sp    = float(np.std(spacings))
+                        mean_fw   = float(np.mean(fwhms))
+                        std_fw    = float(np.std(fwhms))
 
-                        m1, m2, m3 = st.columns(3)
+                        m1, m2, m3, m4 = st.columns(4)
                         m1.metric("Peaks detected", f"{len(peaks)}")
                         m2.metric("Mean spacing",   f"{mean_sp:.1f} px")
                         m3.metric("Std (regularity)", f"± {std_sp:.1f} px")
+                        m4.metric("Mean FWHM",      f"{mean_fw:.1f} px",
+                                  delta=f"± {std_fw:.1f} px",
+                                  delta_color="off")
 
-                        pos_str = "  ·  ".join(f"{p:.0f}" for p in positions)
-                        sp_str  = "  ·  ".join(f"{s:.0f}" for s in spacings)
+                        pos_str  = "  ·  ".join(f"{p:.0f}" for p in positions)
+                        sp_str   = "  ·  ".join(f"{s:.0f}" for s in spacings)
+                        fwhm_str = "  ·  ".join(f"{f:.0f}" for f in fwhms)
                         st.markdown(
                             f'<div style="font-size:13px;color:#555;'
                             f'margin-top:8px;line-height:1.7;">'
                             f'<b>Positions (px):</b> <span style="font-family:monospace;">{pos_str}</span><br>'
-                            f'<b>Spacings (px):</b>  <span style="font-family:monospace;">{sp_str}</span>'
+                            f'<b>Spacings (px):</b>  <span style="font-family:monospace;">{sp_str}</span><br>'
+                            f'<b>FWHMs (px):</b>    <span style="font-family:monospace;">{fwhm_str}</span>'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
