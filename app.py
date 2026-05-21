@@ -208,17 +208,20 @@ def line_scan(img_array: np.ndarray, p1: tuple, p2: tuple, width: int = 0):
 
 
 def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
-                 min_height_ratio: float = 0.25,
-                 min_dist_px: float = 8.0) -> list:
-    """Profile에서 모든 의미있는 local peak 검출.
+                 min_height_ratio:     float = 0.25,
+                 min_prominence_ratio: float = 0.15,
+                 min_dist_px:          float = 20.0) -> list:
+    """Profile에서 모든 의미있는 local peak 검출 (prominence 기반).
 
     Args:
-        distances        : 1D distance array (px, 라인 시작점 기준)
-        intensities      : 1D intensity array (same length)
-        min_height_ratio : 동적 범위 중 최소 peak 높이 비율 (0.25 = 25%)
-        min_dist_px      : peak 간 최소 거리 (px) — 너무 가까운 peak 제거
+        distances             : 1D distance array (px)
+        intensities           : 1D intensity array
+        min_height_ratio      : peak 최소 절대 높이 (동적 범위 비율)
+        min_prominence_ratio  : peak 사이 valley 깊이 (동적 범위 비율) —
+                                같은 봉우리의 sub-peak 거름
+        min_dist_px           : peak 간 최소 거리 (px)
 
-    Returns: list of (distance, intensity) tuples for each detected peak.
+    Returns: list of (distance, intensity) tuples, 위치 순.
     """
     n = len(intensities)
     if n < 5:
@@ -226,40 +229,54 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
 
     y = intensities.astype(np.float64)
 
-    # Smoothing (라인 길이에 비례한 작은 kernel)
-    k = max(3, n // 80)
+    # Smoothing (kernel 크게 — 평탄한 봉우리 정상부 진동 제거)
+    k = max(5, n // 40)
     if k % 2 == 0:
         k += 1
     y_smooth = np.convolve(y, np.ones(k) / k, mode="same")
 
-    # 동적 threshold: baseline + dynamic_range × ratio
+    # 동적 threshold
     baseline = float(np.percentile(y_smooth, 20))
     peak_max = float(y_smooth.max())
-    if peak_max - baseline < 1e-6:
+    dyn_range = peak_max - baseline
+    if dyn_range < 1e-6:
         return []
-    threshold = baseline + (peak_max - baseline) * min_height_ratio
+    height_thresh   = baseline + dyn_range * min_height_ratio
+    min_prominence  = dyn_range * min_prominence_ratio
 
-    # Local maxima above threshold
-    raw_peaks = []
-    for i in range(1, n - 1):
-        if (y_smooth[i] >= y_smooth[i - 1] and
-            y_smooth[i] >= y_smooth[i + 1] and
-            y_smooth[i] > threshold):
-            raw_peaks.append(i)
-
-    if not raw_peaks:
+    # Strict local maxima (>, 평탄 정상부 미세 진동 회피)
+    candidates = [
+        i for i in range(1, n - 1)
+        if y_smooth[i] > y_smooth[i - 1]
+        and y_smooth[i] > y_smooth[i + 1]
+        and y_smooth[i] > height_thresh
+    ]
+    if not candidates:
         return []
 
-    # 가까운 peak NMS (min_dist_px 이내면 더 높은 것만 keep)
-    raw_peaks.sort(key=lambda i: -y_smooth[i])  # 높이 내림차순
-    kept = []
-    for i in raw_peaks:
-        if all(abs(distances[i] - distances[j]) >= min_dist_px for j in kept):
-            kept.append(i)
-    kept.sort(key=lambda i: distances[i])       # 위치 순으로 다시 정렬
+    # ── Prominence 필터 ──────────────────────────────────────────────
+    # 높이 내림차순으로 검토하면서, 이미 accept된 peak과 사이의 valley가
+    # 충분히 깊은지 확인. 얕으면 같은 봉우리의 sub-peak → 거름.
+    candidates.sort(key=lambda i: -y_smooth[i])
+    accepted = []
+    for c in candidates:
+        # 거리 필터
+        if any(abs(distances[c] - distances[a]) < min_dist_px for a in accepted):
+            continue
+        # Prominence 필터 (accept된 peak과 사이의 가장 깊은 valley 검사)
+        is_isolated = True
+        for a in accepted:
+            lo, hi = min(c, a), max(c, a)
+            valley = float(y_smooth[lo:hi + 1].min())
+            smaller_top = min(y_smooth[c], y_smooth[a])
+            if smaller_top - valley < min_prominence:
+                is_isolated = False  # 같은 봉우리
+                break
+        if is_isolated:
+            accepted.append(c)
 
-    # 원본 intensity 값으로 반환 (smoothed 아님)
-    return [(float(distances[i]), float(y[i])) for i in kept]
+    accepted.sort(key=lambda i: distances[i])
+    return [(float(distances[i]), float(y[i])) for i in accepted]
 
 
 # ── Probability bar chart ──────────────────────────────────────────────────────
