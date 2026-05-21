@@ -168,6 +168,42 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
 
 
 # ── Line Scan Tool ─────────────────────────────────────────────────────────────
+def find_next_bright_peak(profile, start_x, min_dist=12, min_height_ratio=0.4):
+    """수평 profile에서 start_x 이후 첫 번째 의미있는 bright peak 찾기.
+
+    Args:
+        profile           : 1D intensity array (np.float32)
+        start_x           : 시작 x 위치 (이 위치 + min_dist 이후 탐색)
+        min_dist          : 시작점 근처는 무시 (현재 peak 자체 회피)
+        min_height_ratio  : 동적 범위의 최소 비율 (낮을수록 약한 peak도 잡음)
+
+    Returns: 다음 peak의 x 위치 (int), 없으면 None.
+    """
+    n = len(profile)
+    if start_x + min_dist >= n - 2:
+        return None
+
+    # Smooth (수평 노이즈 완화)
+    k = max(3, n // 80)
+    if k % 2 == 0:
+        k += 1
+    smoothed = np.convolve(profile, np.ones(k) / k, mode="same")
+
+    # 동적 threshold (배경 + dynamic range × ratio)
+    baseline = float(np.percentile(smoothed, 30))
+    peak_max = float(smoothed.max())
+    threshold = baseline + (peak_max - baseline) * min_height_ratio
+
+    # start_x + min_dist 이후 local max 찾기
+    search_start = start_x + min_dist
+    for i in range(search_start + 1, n - 1):
+        if (smoothed[i] >= smoothed[i - 1] and
+            smoothed[i] >= smoothed[i + 1] and
+            smoothed[i] > threshold):
+            return i
+    return None
+
+
 def gaussian(x, height, center, fwhm, offset):
     """단일 Gaussian: peak height + FWHM 파라미터화."""
     if fwhm <= 0:
@@ -462,10 +498,31 @@ for f in uploaded:
                     ny = max(0, min(natural_h - 1, ny))
                     new_pt = (nx, ny)
 
-                    if p1 is None:
+                    # ── 클릭 분기 ───────────────────────────────────────────
+                    #  p1 없음        → 새 시작: p1 설정 + 자동으로 다음 peak 검출
+                    #  p1 있고 p2 없음 → auto 실패시 사용자가 수동으로 p2 클릭
+                    #  둘 다 있음      → 재시작: 새 p1 + 자동 검출
+                    is_first_click = (p1 is None) or (p1 is not None and p2 is not None)
+
+                    if is_first_click:
                         st.session_state[sk_p1] = new_pt
-                    elif p2 is None:
+                        st.session_state[sk_p2] = None
+                        # ── AUTO: 수평으로 오른쪽 가서 다음 bright peak 찾기 ──
+                        gray = np.array(img.convert("L"), dtype=np.float32)
+                        gh, gw = gray.shape
+                        # 수직 ±3px 평균 (노이즈 완화)
+                        y_lo = max(0, ny - 3)
+                        y_hi = min(gh, ny + 4)
+                        h_profile = gray[y_lo:y_hi, :].mean(axis=0)
+                        next_x = find_next_bright_peak(
+                            h_profile, nx, min_dist=12, min_height_ratio=0.4
+                        )
+                        if next_x is not None:
+                            st.session_state[sk_p2] = (int(next_x), ny)
+                    else:
+                        # p1 있고 p2 없음 (auto 실패) → 수동 p2
                         st.session_state[sk_p2] = new_pt
+
                     st.rerun()
 
             # Profile + fit
