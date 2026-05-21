@@ -167,6 +167,27 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
 
 
 # ── Line Scan Tool ─────────────────────────────────────────────────────────────
+def snap_to_axis(p1: tuple, p2: tuple, snap_deg: float = 5.0) -> tuple:
+    """라인이 수평/수직에서 snap_deg 이내면 정확히 일직선으로 보정.
+
+    수평 snap: |angle| < snap_deg 또는 |angle - 180| < snap_deg → y2 = y1
+    수직 snap: |angle - 90| < snap_deg                            → x2 = x1
+    그 외: 그대로 반환.
+    """
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    if dx == 0 and dy == 0:
+        return p2
+    angle = abs(np.degrees(np.arctan2(dy, dx)))
+    # 수평 (0° 또는 180°)
+    if angle < snap_deg or angle > (180 - snap_deg):
+        return (int(p2[0]), int(p1[1]))
+    # 수직 (90°)
+    if abs(angle - 90) < snap_deg:
+        return (int(p1[0]), int(p2[1]))
+    return p2
+
+
 def line_scan(img_array: np.ndarray, p1: tuple, p2: tuple, width: int = 0):
     """이미지 위 p1→p2 라인 따라 intensity profile 추출.
 
@@ -438,6 +459,15 @@ for f in uploaded:
                     st.session_state[sk_last] = None
                     st.rerun()
 
+                # Snap toggle: 수평/수직에서 5° 이내면 자동 정렬
+                snap_on = st.checkbox(
+                    "📐 Snap to horizontal/vertical",
+                    value=True,
+                    key=f"ls_snap_{f.name}",
+                    help="If your second click is within 5° of horizontal or "
+                         "vertical, the line is auto-aligned perfectly straight.",
+                )
+
                 # Integration width: 라인 수직 방향 평균 픽셀 수
                 # (노이즈 완화 — 3px 정도가 일반적인 sweet spot)
                 width_px = 3
@@ -489,7 +519,9 @@ for f in uploaded:
                     if p1 is None:
                         st.session_state[sk_p1] = new_pt
                     elif p2 is None:
-                        st.session_state[sk_p2] = new_pt
+                        # 수평/수직 snap (toggle ON일 때)
+                        final_pt = snap_to_axis(p1, new_pt) if snap_on else new_pt
+                        st.session_state[sk_p2] = final_pt
                     st.rerun()
 
             # Profile + multi-peak detection
