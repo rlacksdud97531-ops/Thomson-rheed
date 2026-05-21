@@ -228,49 +228,6 @@ def line_scan(img_array: np.ndarray, p1: tuple, p2: tuple, width: int = 0):
     return distances, intensities
 
 
-# ── Spot Box Tool ──────────────────────────────────────────────────────────────
-def compute_box_stats(img_array: np.ndarray, center: tuple, box_size: int) -> dict:
-    """Center 좌표 주위로 box_size × box_size 박스의 통계.
-
-    Args:
-        img_array : 2D grayscale numpy array
-        center    : (x, y) 픽셀 좌표 (클릭 위치)
-        box_size  : 박스 한 변 (px). 짝수면 자동 +1.
-
-    Returns: dict — bbox, max, mean, sum, background, net_sum, pixel_count
-             None if box is empty (off-image edge case)
-    """
-    cx, cy = center
-    if box_size % 2 == 0:
-        box_size += 1
-    half = box_size // 2
-    h, w = img_array.shape
-
-    x0 = max(0, cx - half)
-    x1 = min(w, cx + half + 1)
-    y0 = max(0, cy - half)
-    y1 = min(h, cy + half + 1)
-
-    roi = img_array[y0:y1, x0:x1].astype(np.float64)
-    if roi.size == 0:
-        return None
-
-    # Background: 25분위수 (박스 안 어두운 픽셀들의 대표값)
-    background = float(np.percentile(roi, 25))
-    # Net signal = (roi - bg) 의 양의 값만 합 (실제 spot 강도)
-    net_sum = float((roi - background).clip(min=0).sum())
-
-    return {
-        "bbox":        (int(x0), int(y0), int(x1), int(y1)),
-        "max":         float(roi.max()),
-        "mean":        float(roi.mean()),
-        "sum":         float(roi.sum()),
-        "background":  background,
-        "net_sum":     net_sum,
-        "pixel_count": int(roi.size),
-    }
-
-
 def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
                  min_height_ratio:     float = 0.25,
                  min_prominence_ratio: float = 0.15,
@@ -635,8 +592,8 @@ for f in uploaded:
                             unsafe_allow_html=True,
                         )
 
-        # ── Spot Box Tool ──────────────────────────────────────────────────────
-        with st.expander("🎯 Spot Box Tool — measure spot intensity", expanded=False):
+        # ── Spot Box Tool — 1-click horizontal profile + peak detection ───────
+        with st.expander("🎯 Spot Box Tool — 1-click streak profile", expanded=False):
             sk_center = f"sb_center_{f.name}"
             sk_last_b = f"sb_last_{f.name}"
             for k in (sk_center, sk_last_b):
@@ -648,10 +605,14 @@ for f in uploaded:
 
             with c_ctrl_b:
                 st.markdown("**How to use:**")
-                st.caption("Click on any spot/streak to center the box.")
+                st.caption(
+                    "Click the center of the region you want to analyze. "
+                    "A wide box is drawn around the click — the profile is "
+                    "averaged vertically and all peaks detected automatically."
+                )
 
                 if center is None:
-                    st.info("👆 Click on a spot in the image")
+                    st.info("👆 Click on the image")
                 else:
                     st.success(f"Center: ({center[0]}, {center[1]})")
 
@@ -660,34 +621,38 @@ for f in uploaded:
                     st.session_state[sk_last_b] = None
                     st.rerun()
 
-                box_size = st.slider(
-                    "Box size (px)",
-                    min_value=20, max_value=200, value=50, step=2,
-                    key=f"sb_size_{f.name}",
-                    help="Edge length of the square ROI centered on click.",
+                box_w = st.slider(
+                    "Box width (px)",
+                    min_value=100, max_value=2000, value=800, step=20,
+                    key=f"sb_w_{f.name}",
+                    help="Horizontal extent — how far left/right to scan.",
+                )
+                box_h = st.slider(
+                    "Box height (px)",
+                    min_value=5, max_value=100, value=20, step=1,
+                    key=f"sb_h_{f.name}",
+                    help="Vertical extent — pixels averaged for noise reduction.",
                 )
 
             with c_img_b:
-                # Draw box overlay on original image
+                # Box 오버레이 그림
                 display_b = img.copy().convert("RGB")
                 drw_b     = ImageDraw.Draw(display_b)
 
                 if center is not None:
                     cx, cy = center
-                    half = box_size // 2
-                    bx0, by0 = cx - half, cy - half
-                    bx1, by1 = cx + half, cy + half
-                    # White outline + red box (visible on any background)
+                    hw, hh = box_w // 2, box_h // 2
+                    iw, ih = img.size
+                    bx0 = max(0,  cx - hw); bx1 = min(iw, cx + hw)
+                    by0 = max(0,  cy - hh); by1 = min(ih, cy + hh)
                     drw_b.rectangle([bx0 - 1, by0 - 1, bx1 + 1, by1 + 1],
                                     outline="white", width=4)
                     drw_b.rectangle([bx0, by0, bx1, by1],
-                                    outline="red", width=2)
-                    # Center marker
+                                    outline="red",   width=2)
                     drw_b.ellipse([cx - 5, cy - 5, cx + 5, cy + 5],
                                   fill="red", outline="white", width=1)
 
-                # State 변화마다 key 다르게 → cache 무효화
-                state_id_b = f"{center}_{box_size}"
+                state_id_b = f"{center}_{box_w}_{box_h}"
                 value_b = streamlit_image_coordinates(
                     display_b,
                     key=f"sb_clicker_{f.name}_{state_id_b}",
@@ -696,7 +661,6 @@ for f in uploaded:
 
                 if value_b is not None and value_b != st.session_state[sk_last_b]:
                     st.session_state[sk_last_b] = value_b
-                    # 좌표 스케일링: 표시 → 원본
                     natural_w, natural_h = img.size
                     disp_w = value_b.get("width",  natural_w)
                     disp_h = value_b.get("height", natural_h)
@@ -710,23 +674,80 @@ for f in uploaded:
                     st.session_state[sk_center] = (nx, ny)
                     st.rerun()
 
-            # ── Stats ────────────────────────────────────────────────────────
+            # ── Auto profile + peak detection ────────────────────────────────
             if center is not None:
                 gray_arr = np.array(img.convert("L"), dtype=np.float64)
-                stats    = compute_box_stats(gray_arr, center, box_size)
+                cx, cy   = center
+                hw, hh   = box_w // 2, box_h // 2
+                ih, iw   = gray_arr.shape
+                x0 = max(0,  cx - hw); x1 = min(iw, cx + hw + 1)
+                y0 = max(0,  cy - hh); y1 = min(ih, cy + hh + 1)
+                roi = gray_arr[y0:y1, x0:x1]
 
-                if stats is not None:
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("Max",        f"{stats['max']:.0f}")
-                    m2.metric("Mean",       f"{stats['mean']:.1f}")
-                    m3.metric("Background", f"{stats['background']:.0f}")
-                    m4.metric("Net signal", f"{stats['net_sum']:.0f}")
-
-                    bx0, by0, bx1, by1 = stats["bbox"]
-                    st.caption(
-                        f"Box: ({bx0}, {by0}) → ({bx1}, {by1})  ·  "
-                        f"{stats['pixel_count']} px  ·  "
-                        f"Total sum: {stats['sum']:.0f}"
-                    )
-                else:
+                if roi.size == 0:
                     st.warning("Box is out of image bounds.")
+                else:
+                    # 수직 평균 → 1D 수평 profile
+                    profile   = roi.mean(axis=0)
+                    distances = np.arange(len(profile), dtype=np.float64)
+                    peaks     = detect_peaks(distances, profile)
+
+                    fig, ax = plt.subplots(figsize=(8, 3))
+                    ax.plot(distances, profile, "b-", linewidth=1.2,
+                            label="Profile (avg)")
+                    if peaks:
+                        px = [p[0] for p in peaks]
+                        py = [p[1] for p in peaks]
+                        ax.plot(px, py, "ro", markersize=8,
+                                markeredgecolor="white", markeredgewidth=1.5,
+                                label=f"Peaks ({len(peaks)})")
+                        for x_p in px:
+                            ax.axvline(x=x_p, color="red", linestyle=":",
+                                       linewidth=0.8, alpha=0.5)
+                    ax.set_xlabel(
+                        f"Distance from left edge of box (px)  ·  "
+                        f"Box: {x1 - x0} × {y1 - y0}"
+                    )
+                    ax.set_ylabel("Intensity (avg)")
+                    ax.grid(True, alpha=0.3)
+                    ax.legend(loc="upper right", fontsize=9)
+                    ax.spines[["top", "right"]].set_visible(False)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+
+                    # Metrics (Line Scan과 동일)
+                    if len(peaks) == 0:
+                        st.warning(
+                            "No peaks detected — try larger box width or "
+                            "move center."
+                        )
+                    elif len(peaks) == 1:
+                        st.info(
+                            f"**1 peak detected** at position "
+                            f"**{peaks[0][0]:.1f} px** (intensity "
+                            f"{peaks[0][1]:.0f}). Increase box width to "
+                            f"capture more streaks."
+                        )
+                    else:
+                        positions = [p[0] for p in peaks]
+                        spacings  = [positions[j + 1] - positions[j]
+                                     for j in range(len(positions) - 1)]
+                        mean_sp = float(np.mean(spacings))
+                        std_sp  = float(np.std(spacings))
+
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Peaks detected", f"{len(peaks)}")
+                        m2.metric("Mean spacing",   f"{mean_sp:.1f} px")
+                        m3.metric("Std (regularity)", f"± {std_sp:.1f} px")
+
+                        pos_str = "  ·  ".join(f"{p:.0f}" for p in positions)
+                        sp_str  = "  ·  ".join(f"{s:.0f}" for s in spacings)
+                        st.markdown(
+                            f'<div style="font-size:13px;color:#555;'
+                            f'margin-top:8px;line-height:1.7;">'
+                            f'<b>Positions (px):</b> <span style="font-family:monospace;">{pos_str}</span><br>'
+                            f'<b>Spacings (px):</b>  <span style="font-family:monospace;">{sp_str}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
