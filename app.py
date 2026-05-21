@@ -378,13 +378,6 @@ for f in uploaded:
             c_ctrl_b, c_img_b = st.columns([1, 2])
 
             with c_ctrl_b:
-                st.markdown("**How to use:**")
-                st.caption(
-                    "Click the center of the region you want to analyze. "
-                    "A wide box is drawn around the click — the profile is "
-                    "averaged vertically and all peaks detected automatically."
-                )
-
                 if center is None:
                     st.info("👆 Click on the image")
                 else:
