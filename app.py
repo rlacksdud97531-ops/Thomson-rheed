@@ -11,7 +11,6 @@ from PIL import Image, ImageOps, ImageDraw
 import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
 from streamlit_image_coordinates import streamlit_image_coordinates
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -168,14 +167,6 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
 
 
 # ── Line Scan Tool ─────────────────────────────────────────────────────────────
-def gaussian(x, height, center, fwhm, offset):
-    """단일 Gaussian: peak height + FWHM 파라미터화."""
-    if fwhm <= 0:
-        return np.full_like(x, offset, dtype=np.float64)
-    sigma = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
-    return height * np.exp(-(x - center) ** 2 / (2.0 * sigma ** 2)) + offset
-
-
 def line_scan(img_array: np.ndarray, p1: tuple, p2: tuple, width: int = 0):
     """이미지 위 p1→p2 라인 따라 intensity profile 추출.
 
@@ -216,43 +207,59 @@ def line_scan(img_array: np.ndarray, p1: tuple, p2: tuple, width: int = 0):
     return distances, intensities
 
 
-def fit_gaussian_profile(distances: np.ndarray, intensities: np.ndarray):
-    """Profile에 단일 Gaussian fit. scipy.curve_fit + bounds 사용.
+def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
+                 min_height_ratio: float = 0.25,
+                 min_dist_px: float = 8.0) -> list:
+    """Profile에서 모든 의미있는 local peak 검출.
 
-    Returns: dict {height, center, fwhm, offset, r2} or None on failure.
+    Args:
+        distances        : 1D distance array (px, 라인 시작점 기준)
+        intensities      : 1D intensity array (same length)
+        min_height_ratio : 동적 범위 중 최소 peak 높이 비율 (0.25 = 25%)
+        min_dist_px      : peak 간 최소 거리 (px) — 너무 가까운 peak 제거
+
+    Returns: list of (distance, intensity) tuples for each detected peak.
     """
-    if len(distances) < 5:
-        return None
+    n = len(intensities)
+    if n < 5:
+        return []
 
-    x = distances.astype(np.float64)
     y = intensities.astype(np.float64)
 
-    y_min, y_max = float(y.min()), float(y.max())
-    height0 = y_max - y_min
-    if height0 < 1e-6:
-        return None
-    center0 = float(x[int(np.argmax(y))])
-    fwhm0   = float(x.max() - x.min()) / 4.0
-    offset0 = y_min
+    # Smoothing (라인 길이에 비례한 작은 kernel)
+    k = max(3, n // 80)
+    if k % 2 == 0:
+        k += 1
+    y_smooth = np.convolve(y, np.ones(k) / k, mode="same")
 
-    try:
-        popt, _ = curve_fit(
-            gaussian, x, y,
-            p0=[height0, center0, fwhm0, offset0],
-            bounds=([0.0, float(x.min()), 0.5, y_min - 1.0],
-                    [np.inf, float(x.max()), float(x.max() - x.min()), y_max + 1.0]),
-            maxfev=2000,
-        )
-    except (RuntimeError, ValueError):
-        return None
+    # 동적 threshold: baseline + dynamic_range × ratio
+    baseline = float(np.percentile(y_smooth, 20))
+    peak_max = float(y_smooth.max())
+    if peak_max - baseline < 1e-6:
+        return []
+    threshold = baseline + (peak_max - baseline) * min_height_ratio
 
-    height, center, fwhm, offset = (float(v) for v in popt)
-    y_fit  = gaussian(x, *popt)
-    ss_res = float(np.sum((y - y_fit) ** 2))
-    ss_tot = float(np.sum((y - y.mean()) ** 2))
-    r2 = 1.0 - ss_res / ss_tot if ss_tot > 1e-9 else 0.0
-    return {"height": height, "center": center, "fwhm": fwhm,
-            "offset": offset, "r2": r2}
+    # Local maxima above threshold
+    raw_peaks = []
+    for i in range(1, n - 1):
+        if (y_smooth[i] >= y_smooth[i - 1] and
+            y_smooth[i] >= y_smooth[i + 1] and
+            y_smooth[i] > threshold):
+            raw_peaks.append(i)
+
+    if not raw_peaks:
+        return []
+
+    # 가까운 peak NMS (min_dist_px 이내면 더 높은 것만 keep)
+    raw_peaks.sort(key=lambda i: -y_smooth[i])  # 높이 내림차순
+    kept = []
+    for i in raw_peaks:
+        if all(abs(distances[i] - distances[j]) >= min_dist_px for j in kept):
+            kept.append(i)
+    kept.sort(key=lambda i: distances[i])       # 위치 순으로 다시 정렬
+
+    # 원본 intensity 값으로 반환 (smoothed 아님)
+    return [(float(distances[i]), float(y[i])) for i in kept]
 
 
 # ── Probability bar chart ──────────────────────────────────────────────────────
@@ -468,23 +475,28 @@ for f in uploaded:
                         st.session_state[sk_p2] = new_pt
                     st.rerun()
 
-            # Profile + fit
+            # Profile + multi-peak detection
             if p1 is not None and p2 is not None:
                 gray_arr = np.array(img.convert("L"), dtype=np.float64)
                 distances, intensities = line_scan(gray_arr, p1, p2, width=width_px)
 
                 if len(distances) > 0:
-                    fit = fit_gaussian_profile(distances, intensities)
+                    peaks = detect_peaks(distances, intensities)
 
+                    # ── Plot: profile + 빨간 점으로 peak 표시 ─────────────
                     fig, ax = plt.subplots(figsize=(8, 3))
                     ax.plot(distances, intensities, "b-", linewidth=1.2,
                             label="Profile")
-                    if fit is not None:
-                        x_fit = np.linspace(distances.min(), distances.max(), 200)
-                        y_fit = gaussian(x_fit, fit["height"], fit["center"],
-                                         fit["fwhm"], fit["offset"])
-                        ax.plot(x_fit, y_fit, "r--", linewidth=1.6,
-                                label=f"Gaussian (R²={fit['r2']:.3f})")
+                    if peaks:
+                        px = [p[0] for p in peaks]
+                        py = [p[1] for p in peaks]
+                        ax.plot(px, py, "ro", markersize=8,
+                                markeredgecolor="white", markeredgewidth=1.5,
+                                label=f"Peaks ({len(peaks)})")
+                        # peak 위치에 세로 점선
+                        for x_p in px:
+                            ax.axvline(x=x_p, color="red", linestyle=":",
+                                       linewidth=0.8, alpha=0.5)
                     ax.set_xlabel("Distance along line (px)")
                     ax.set_ylabel("Intensity")
                     ax.grid(True, alpha=0.3)
@@ -494,14 +506,39 @@ for f in uploaded:
                     st.pyplot(fig)
                     plt.close(fig)
 
-                    if fit is not None:
-                        m1, m2, m3, m4 = st.columns(4)
-                        m1.metric("Peak position", f"{fit['center']:.1f} px")
-                        m2.metric("FWHM",          f"{fit['fwhm']:.1f} px")
-                        m3.metric("Peak height",   f"{fit['height']:.0f}")
-                        m4.metric("Fit R²",        f"{fit['r2']:.3f}")
-                    else:
+                    # ── Metrics: peak count, positions, spacings ─────────
+                    if len(peaks) == 0:
                         st.warning(
-                            "Could not fit Gaussian — try different line "
-                            "or increase integration width."
+                            "No peaks detected — try a different line "
+                            "or longer scan."
+                        )
+                    elif len(peaks) == 1:
+                        st.info(
+                            f"**1 peak detected** at position "
+                            f"**{peaks[0][0]:.1f} px** (intensity "
+                            f"{peaks[0][1]:.0f}). Draw a longer line "
+                            f"across multiple streaks to measure spacing."
+                        )
+                    else:
+                        positions = [p[0] for p in peaks]
+                        spacings  = [positions[j + 1] - positions[j]
+                                     for j in range(len(positions) - 1)]
+                        mean_sp = float(np.mean(spacings))
+                        std_sp  = float(np.std(spacings))
+
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Peaks detected", f"{len(peaks)}")
+                        m2.metric("Mean spacing",   f"{mean_sp:.1f} px")
+                        m3.metric("Std (regularity)", f"± {std_sp:.1f} px")
+
+                        # 자세한 정보
+                        pos_str = "  ·  ".join(f"{p:.0f}" for p in positions)
+                        sp_str  = "  ·  ".join(f"{s:.0f}" for s in spacings)
+                        st.markdown(
+                            f'<div style="font-size:13px;color:#555;'
+                            f'margin-top:8px;line-height:1.7;">'
+                            f'<b>Positions (px):</b> <span style="font-family:monospace;">{pos_str}</span><br>'
+                            f'<b>Spacings (px):</b>  <span style="font-family:monospace;">{sp_str}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
                         )
