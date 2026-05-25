@@ -167,6 +167,43 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
 
 
 # ── Peak detection (used by Spot Box Tool) ─────────────────────────────────────
+def _local_baseline_at_peak(y_smooth: np.ndarray, distances: np.ndarray,
+                            peak_idx: int, all_peak_indices: list) -> float:
+    """Local baseline: 좌측 valley 와 우측 valley 를 직선으로 잇고 peak 위치 값.
+
+    이게 spectroscopy 의 표준 "linear baseline subtraction":
+      - 좌측 valley: 직전 peak (또는 시작) 부터 현 peak 까지의 min
+      - 우측 valley: 현 peak 부터 직후 peak (또는 끝) 까지의 min
+      - peak 위치에서 두 valley 잇는 직선 위의 값 = local baseline
+
+    이로써 인접 peak 의 tail overlap 효과나 기울어진 배경을 자동 보정.
+    """
+    n = len(y_smooth)
+
+    # 좌측 valley
+    left_peaks = [p for p in all_peak_indices if p < peak_idx]
+    left_bound = max(left_peaks) if left_peaks else 0
+    left_valley_idx = left_bound + int(np.argmin(y_smooth[left_bound:peak_idx + 1]))
+
+    # 우측 valley
+    right_peaks = [p for p in all_peak_indices if p > peak_idx]
+    right_bound = min(right_peaks) if right_peaks else n - 1
+    right_valley_idx = peak_idx + int(np.argmin(y_smooth[peak_idx:right_bound + 1]))
+
+    # 두 valley 잇는 직선의 peak 위치 값 (선형 보간)
+    y_left  = float(y_smooth[left_valley_idx])
+    y_right = float(y_smooth[right_valley_idx])
+    x_left  = float(distances[left_valley_idx])
+    x_right = float(distances[right_valley_idx])
+    x_peak  = float(distances[peak_idx])
+
+    if abs(x_right - x_left) < 1e-9:
+        return (y_left + y_right) / 2.0
+
+    t = (x_peak - x_left) / (x_right - x_left)
+    return y_left + t * (y_right - y_left)
+
+
 def _compute_fwhm(distances: np.ndarray, y_smooth: np.ndarray,
                   peak_idx: int, baseline: float) -> dict:
     """Peak에서 양쪽으로 half-max 만나는 지점까지 걸어가서 FWHM 계산.
@@ -299,10 +336,12 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
 
     accepted.sort(key=lambda i: distances[i])
 
-    # 각 accepted peak에 대해 FWHM 계산
+    # 각 accepted peak 마다 local baseline + FWHM 계산
+    # (global baseline 대신 좌우 valley 선형 보간으로 per-peak baseline)
     peaks = []
     for idx in accepted:
-        fw = _compute_fwhm(distances, y_smooth, idx, baseline)
+        local_bl = _local_baseline_at_peak(y_smooth, distances, idx, accepted)
+        fw       = _compute_fwhm(distances, y_smooth, idx, local_bl)
         peaks.append({
             "x":          float(distances[idx]),
             "y":          float(y[idx]),
@@ -310,6 +349,7 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
             "fwhm_left":  fw["left_x"],
             "fwhm_right": fw["right_x"],
             "half_max":   fw["half_max"],
+            "baseline":   local_bl,       # per-peak local baseline (시각화/디버깅용)
         })
     return peaks
 
@@ -540,6 +580,11 @@ for f in uploaded:
                     if peaks:
                         px = [p["x"] for p in peaks]
                         py = [p["y"] for p in peaks]
+                        # Local baseline tick (peak 위치에서 baseline 값 표시 — 회색)
+                        for p in peaks:
+                            ax.plot([p["x"]], [p["baseline"]], marker="_",
+                                    color="gray", markersize=14,
+                                    markeredgewidth=2)
                         # FWHM 경계선 (반높이 가로 막대) — 진한 빨강
                         for p in peaks:
                             ax.hlines(
@@ -560,9 +605,12 @@ for f in uploaded:
                         ax.plot(px, py, "ro", markersize=8,
                                 markeredgecolor="white", markeredgewidth=1.5,
                                 label=f"Peaks ({len(peaks)})")
-                        # FWHM legend entry (dummy line)
+                        # Legend entries (dummy lines)
                         ax.plot([], [], "r-", linewidth=2.5,
                                 label="FWHM (at half-max)")
+                        ax.plot([], [], marker="_", color="gray", linestyle="",
+                                markersize=14, markeredgewidth=2,
+                                label="Local baseline")
                     ax.set_xlabel(
                         f"Distance from left edge of box (px)  ·  "
                         f"Box: {x1 - x0} × {y1 - y0}"
