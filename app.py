@@ -192,25 +192,28 @@ def _baseline_at(distances: np.ndarray, y_smooth: np.ndarray,
     return y_l + t * (y_r - y_l)
 
 
-def _compute_fwhm_walk(distances: np.ndarray, y_smooth: np.ndarray,
-                       peak_idx: int, left_v: int, right_v: int) -> dict:
-    """Walk method: peak 에서 양쪽으로 걸어가며 half-max 교차점 (선형 보간).
+def _compute_fwhm_walk(distances: np.ndarray, y_raw: np.ndarray,
+                       y_smooth: np.ndarray, peak_idx: int,
+                       left_v: int, right_v: int) -> dict:
+    """Walk method (hybrid): raw 값으로 half_max 정하고 smoothed 로 walk.
 
-    Half-max 는 **기울어진 baseline** 위로 솟은 만큼의 절반:
-        half_max(x) = baseline_line(x) + (peak_y - baseline_line(peak_x)) / 2
-    근사: half-max line 도 baseline 과 평행한 기울어진 선이 자연스럽지만,
-    여기서는 단순화를 위해 **peak 위치의 half_max** 를 수평으로 walk.
-    교차 판정도 같은 half_max 값으로 함 (인접 peak 침범 시 stop).
+    - peak_y, baseline → RAW 값 (화면 표시와 일관)
+    - Walk crossing 탐색 → SMOOTHED 값 (raw 노이즈로 잘못 stop 방지)
     """
     n        = len(y_smooth)
-    peak_y   = float(y_smooth[peak_idx])
+    peak_y   = float(y_raw[peak_idx])
     peak_x   = float(distances[peak_idx])
-    bl_at_p  = _baseline_at(distances, y_smooth, peak_x, left_v, right_v)
+    bl_at_p  = _baseline_at(distances, y_raw, peak_x, left_v, right_v)
     half_max = bl_at_p + (peak_y - bl_at_p) / 2.0
 
-    # ── 왼쪽 walk ──
-    left_x = float(distances[left_v])  # default: valley
-    prev_y = peak_y
+    # Safety cap: half_max 가 smoothed peak 보다 위면 walk 불가 → 살짝 낮춤
+    smooth_peak = float(y_smooth[peak_idx])
+    if half_max >= smooth_peak:
+        half_max = smooth_peak - 0.5
+
+    # ── 왼쪽 walk (smoothed 사용) ──
+    left_x = float(distances[left_v])
+    prev_y = smooth_peak
     for i in range(peak_idx - 1, left_v - 1, -1):
         yi = float(y_smooth[i])
         if yi <= half_max:
@@ -227,9 +230,9 @@ def _compute_fwhm_walk(distances: np.ndarray, y_smooth: np.ndarray,
             break
         prev_y = yi
 
-    # ── 오른쪽 walk ──
+    # ── 오른쪽 walk (smoothed 사용) ──
     right_x = float(distances[right_v])
-    prev_y  = peak_y
+    prev_y  = smooth_peak
     for i in range(peak_idx + 1, right_v + 1):
         yi = float(y_smooth[i])
         if yi <= half_max:
@@ -324,7 +327,8 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
     peaks = []
     for idx in accepted:
         left_v, right_v = _find_valleys(y_smooth, idx, accepted)
-        fw              = _compute_fwhm_walk(distances, y, idx, left_v, right_v)
+        fw              = _compute_fwhm_walk(distances, y, y_smooth,
+                                             idx, left_v, right_v)
         peaks.append({
             "x":              float(distances[idx]),
             "y":              float(y[idx]),
