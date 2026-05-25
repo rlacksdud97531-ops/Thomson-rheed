@@ -193,59 +193,66 @@ def _gauss_func(x, amp, mu, sigma, bl):
 
 
 def _fit_gaussian(distances: np.ndarray, intensities: np.ndarray,
-                  peak_idx: int, baseline_init: float,
+                  peak_idx: int, baseline_fixed: float, walk_fwhm: float,
                   left_v: int, right_v: int) -> dict:
-    """단일 Gaussian fit (baseline 포함 4-parameter), valley 사이만 fit.
+    """3-parameter Gaussian fit (amp, μ, σ), baseline 은 flat baseline 으로 고정.
+
+    개선점:
+      - Fit window: [μ ± 1.5 · walk_FWHM] (인접 tail / background 영향 최소화)
+      - baseline 고정 → Raw walk 와 동일 baseline → 직접 비교 가능
+      - σ 초기값 = walk_FWHM / 2.355 → 정확한 시작점 → 빠른 안정 수렴
 
     Returns dict:
-        success     : 수렴 성공 여부
-        fwhm        : 2√(2 ln 2) · |σ| ≈ 2.355 σ
-        r2          : 적합도
-        mu, sigma, amp, baseline : fit 파라미터
+        success, fwhm, r2, mu, sigma, amp, baseline (=baseline_fixed)
     """
-    x_fit = distances[left_v:right_v + 1].astype(np.float64)
-    y_fit = intensities[left_v:right_v + 1].astype(np.float64)
+    peak_x = float(distances[peak_idx])
+
+    # ── Fit window: peak ± 1.5 × walk_FWHM, valley 안으로 clip ──
+    half_window = max(1.5 * walk_fwhm, 5.0)  # walk_fwhm=0 일 때도 최소폭
+    x_lo = max(peak_x - half_window, float(distances[left_v]))
+    x_hi = min(peak_x + half_window, float(distances[right_v]))
+
+    mask  = (distances >= x_lo) & (distances <= x_hi)
+    x_fit = distances[mask].astype(np.float64)
+    y_fit = intensities[mask].astype(np.float64)
 
     if len(x_fit) < 5:
         return {"success": False, "fwhm": np.nan, "r2": np.nan,
                 "mu": np.nan, "sigma": np.nan, "amp": np.nan,
-                "baseline": baseline_init}
+                "baseline": baseline_fixed}
 
-    peak_y   = float(intensities[peak_idx])
-    peak_x   = float(distances[peak_idx])
-    amp_init = max(peak_y - baseline_init, 1.0)
-    # σ 초기값 — half-max 위 폭에서 추정
-    half_init = baseline_init + amp_init / 2.0
-    above     = y_fit > half_init
-    if above.any():
-        idx_a    = np.where(above)[0]
-        rough_fw = float(x_fit[idx_a[-1]] - x_fit[idx_a[0]])
-        sigma_init = max(rough_fw / 2.355, 1.0)
-    else:
-        sigma_init = max((x_fit[-1] - x_fit[0]) / 6.0, 1.0)
+    peak_y     = float(intensities[peak_idx])
+    amp_init   = max(peak_y - baseline_fixed, 1.0)
+    sigma_init = max(walk_fwhm / 2.355, 1.0) if walk_fwhm > 0 \
+                 else max((x_hi - x_lo) / 6.0, 1.0)
+
+    # 3-parameter Gaussian: baseline 은 고정값
+    def _gauss_3p(x, amp, mu, sigma):
+        return baseline_fixed + amp * np.exp(-(x - mu) ** 2 / (2.0 * sigma ** 2))
 
     try:
         popt, _ = curve_fit(
-            _gauss_func, x_fit, y_fit,
-            p0=[amp_init, peak_x, sigma_init, baseline_init],
-            bounds=([0.0,    float(x_fit[0]),  0.1,                              -np.inf],
-                    [np.inf, float(x_fit[-1]), float(x_fit[-1] - x_fit[0]) * 2.0, np.inf]),
+            _gauss_3p, x_fit, y_fit,
+            p0=[amp_init, peak_x, sigma_init],
+            bounds=([0.0,    float(x_fit[0]),  0.1],
+                    [np.inf, float(x_fit[-1]), float(x_fit[-1] - x_fit[0]) * 2.0]),
             maxfev=2000,
         )
     except (RuntimeError, ValueError):
         return {"success": False, "fwhm": np.nan, "r2": np.nan,
                 "mu": np.nan, "sigma": np.nan, "amp": np.nan,
-                "baseline": baseline_init}
+                "baseline": baseline_fixed}
 
-    amp_f, mu_f, sigma_f, bl_f = (float(v) for v in popt)
-    y_pred = _gauss_func(x_fit, *popt)
+    amp_f, mu_f, sigma_f = (float(v) for v in popt)
+    y_pred = _gauss_3p(x_fit, *popt)
     ss_res = float(np.sum((y_fit - y_pred) ** 2))
     ss_tot = float(np.sum((y_fit - y_fit.mean()) ** 2))
     r2     = 1.0 - ss_res / ss_tot if ss_tot > 1e-9 else 0.0
     fwhm   = 2.0 * np.sqrt(2.0 * np.log(2.0)) * abs(sigma_f)
 
     return {"success": True, "fwhm": float(fwhm), "r2": float(r2),
-            "mu": mu_f, "sigma": abs(sigma_f), "amp": amp_f, "baseline": bl_f}
+            "mu": mu_f, "sigma": abs(sigma_f), "amp": amp_f,
+            "baseline": baseline_fixed}
 
 
 def _compute_fwhm_walk(distances: np.ndarray, y_raw: np.ndarray,
@@ -376,7 +383,8 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
             accepted.append(c)
     accepted.sort(key=lambda i: distances[i])
 
-    # 각 peak: valleys → flat baseline → walk FWHM + Gaussian fit
+    # 각 peak: valleys → flat baseline → walk FWHM → Gaussian fit (순서 중요!)
+    # walk_FWHM 을 Gaussian fit 의 window 결정 + σ 초기값으로 활용
     peaks = []
     for idx in accepted:
         left_v, right_v = _find_valleys(y_smooth, idx, accepted)
@@ -384,7 +392,7 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
         fw_raw          = _compute_fwhm_walk(distances, y, y_smooth,
                                              idx, left_v, right_v)
         fw_gauss        = _fit_gaussian(distances, y, idx, flat_bl,
-                                        left_v, right_v)
+                                        fw_raw["fwhm"], left_v, right_v)
 
         peaks.append({
             "x":              float(distances[idx]),
@@ -677,8 +685,11 @@ for f in uploaded:
                             if not p["fit_ok"]:
                                 continue
                             g  = p["gauss"]
-                            xg = np.linspace(p["left_valley_x"],
-                                             p["right_valley_x"], 200)
+                            # ±2.5σ 범위만 그림 (flat gap 제거, 각 peak 가 깔끔)
+                            half_show = max(2.5 * g["sigma"], p["fwhm_gauss"] * 0.8)
+                            xg_lo = max(p["left_valley_x"],  g["mu"] - half_show)
+                            xg_hi = min(p["right_valley_x"], g["mu"] + half_show)
+                            xg = np.linspace(xg_lo, xg_hi, 200)
                             yg = _gauss_func(xg, g["amp"], g["mu"],
                                              g["sigma"], g["baseline"])
                             ax_b.plot(xg, yg, color="darkorange",
