@@ -12,6 +12,7 @@ import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
 from streamlit_image_coordinates import streamlit_image_coordinates
+from scipy.optimize import curve_fit
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -167,41 +168,106 @@ def detect_reconstruction(model_input: np.ndarray) -> str:
 
 
 # ── Peak detection (used by Spot Box Tool) ─────────────────────────────────────
-def _local_baseline_at_peak(y_smooth: np.ndarray, distances: np.ndarray,
-                            peak_idx: int, all_peak_indices: list) -> float:
-    """Local baseline: 좌측 valley 와 우측 valley 를 직선으로 잇고 peak 위치 값.
+def _find_valleys(y_smooth: np.ndarray, peak_idx: int,
+                  all_peak_indices: list) -> tuple[int, int]:
+    """현재 peak 의 좌측 / 우측 valley 인덱스 반환.
 
-    이게 spectroscopy 의 표준 "linear baseline subtraction":
-      - 좌측 valley: 직전 peak (또는 시작) 부터 현 peak 까지의 min
-      - 우측 valley: 현 peak 부터 직후 peak (또는 끝) 까지의 min
-      - peak 위치에서 두 valley 잇는 직선 위의 값 = local baseline
-
-    이로써 인접 peak 의 tail overlap 효과나 기울어진 배경을 자동 보정.
+    좌측 valley: 직전 peak (없으면 시작) 부터 현 peak 까지의 argmin
+    우측 valley: 현 peak 부터 직후 peak (없으면 끝) 까지의 argmin
     """
     n = len(y_smooth)
-
-    # 좌측 valley
     left_peaks = [p for p in all_peak_indices if p < peak_idx]
     left_bound = max(left_peaks) if left_peaks else 0
-    left_valley_idx = left_bound + int(np.argmin(y_smooth[left_bound:peak_idx + 1]))
+    left_valley = left_bound + int(np.argmin(y_smooth[left_bound:peak_idx + 1]))
 
-    # 우측 valley
     right_peaks = [p for p in all_peak_indices if p > peak_idx]
     right_bound = min(right_peaks) if right_peaks else n - 1
-    right_valley_idx = peak_idx + int(np.argmin(y_smooth[peak_idx:right_bound + 1]))
+    right_valley = peak_idx + int(np.argmin(y_smooth[peak_idx:right_bound + 1]))
 
-    # 두 valley 잇는 직선의 peak 위치 값 (선형 보간)
-    y_left  = float(y_smooth[left_valley_idx])
-    y_right = float(y_smooth[right_valley_idx])
-    x_left  = float(distances[left_valley_idx])
-    x_right = float(distances[right_valley_idx])
-    x_peak  = float(distances[peak_idx])
+    return left_valley, right_valley
 
-    if abs(x_right - x_left) < 1e-9:
-        return (y_left + y_right) / 2.0
 
-    t = (x_peak - x_left) / (x_right - x_left)
-    return y_left + t * (y_right - y_left)
+def _local_baseline(y_smooth: np.ndarray, distances: np.ndarray,
+                    peak_idx: int, left_valley: int, right_valley: int) -> float:
+    """좌측 valley 와 우측 valley 직선의 peak 위치 값 (linear baseline subtraction)."""
+    y_l, y_r = float(y_smooth[left_valley]),  float(y_smooth[right_valley])
+    x_l, x_r = float(distances[left_valley]), float(distances[right_valley])
+    x_p      = float(distances[peak_idx])
+    if abs(x_r - x_l) < 1e-9:
+        return (y_l + y_r) / 2.0
+    t = (x_p - x_l) / (x_r - x_l)
+    return y_l + t * (y_r - y_l)
+
+
+def _gauss_func(x, amp, mu, sigma, bl):
+    """Single Gaussian: bl + amp · exp(-(x-mu)² / (2σ²))."""
+    return bl + amp * np.exp(-(x - mu) ** 2 / (2.0 * sigma ** 2))
+
+
+def _fit_gaussian(distances: np.ndarray, intensities: np.ndarray,
+                  peak_idx: int, baseline_init: float,
+                  left_valley: int, right_valley: int) -> dict:
+    """단일 Gaussian fit (baseline 포함 4-parameter).
+
+    Fit window: [left_valley, right_valley] — 인접 peak 영향 회피.
+    Returns dict:
+        success     : 수렴 성공 여부
+        fwhm        : 2√(2 ln 2) · |σ| ≈ 2.355 σ
+        r2          : 적합도 (1=완벽)
+        mu, sigma, amp, baseline : fit 파라미터
+    """
+    x_fit = distances[left_valley:right_valley + 1].astype(np.float64)
+    y_fit = intensities[left_valley:right_valley + 1].astype(np.float64)
+
+    if len(x_fit) < 5:
+        return {"success": False, "fwhm": np.nan, "r2": np.nan,
+                "mu": np.nan, "sigma": np.nan, "amp": np.nan,
+                "baseline": baseline_init}
+
+    # Initial guesses
+    peak_y    = float(intensities[peak_idx])
+    peak_x    = float(distances[peak_idx])
+    amp_init  = max(peak_y - baseline_init, 1.0)
+    # σ 초기값 — 데이터 위 half-max 폭에서 추정
+    half_init = baseline_init + amp_init / 2.0
+    above     = y_fit > half_init
+    if above.any():
+        idx_a    = np.where(above)[0]
+        rough_fw = float(x_fit[idx_a[-1]] - x_fit[idx_a[0]])
+        sigma_init = max(rough_fw / 2.355, 1.0)
+    else:
+        sigma_init = max((x_fit[-1] - x_fit[0]) / 6.0, 1.0)
+
+    try:
+        popt, _ = curve_fit(
+            _gauss_func, x_fit, y_fit,
+            p0=[amp_init, peak_x, sigma_init, baseline_init],
+            bounds=([0.0,      float(x_fit[0]),  0.1,                       -np.inf],
+                    [np.inf,   float(x_fit[-1]), float(x_fit[-1] - x_fit[0]) * 2.0,
+                                                                              np.inf]),
+            maxfev=2000,
+        )
+    except (RuntimeError, ValueError):
+        return {"success": False, "fwhm": np.nan, "r2": np.nan,
+                "mu": np.nan, "sigma": np.nan, "amp": np.nan,
+                "baseline": baseline_init}
+
+    amp_f, mu_f, sigma_f, bl_f = (float(v) for v in popt)
+    y_pred  = _gauss_func(x_fit, *popt)
+    ss_res  = float(np.sum((y_fit - y_pred) ** 2))
+    ss_tot  = float(np.sum((y_fit - y_fit.mean()) ** 2))
+    r2      = 1.0 - ss_res / ss_tot if ss_tot > 1e-9 else 0.0
+    fwhm    = 2.0 * np.sqrt(2.0 * np.log(2.0)) * abs(sigma_f)
+
+    return {
+        "success": True,
+        "fwhm":    float(fwhm),
+        "r2":      float(r2),
+        "mu":      mu_f,
+        "sigma":   abs(sigma_f),
+        "amp":     amp_f,
+        "baseline": bl_f,
+    }
 
 
 def _compute_fwhm(distances: np.ndarray, y_smooth: np.ndarray,
@@ -340,20 +406,35 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
 
     accepted.sort(key=lambda i: distances[i])
 
-    # 각 accepted peak 마다 local baseline + FWHM 계산
-    # (global baseline 대신 좌우 valley 선형 보간으로 per-peak baseline)
+    # 각 accepted peak 마다 valleys → local baseline → walk FWHM + Gaussian fit
     peaks = []
     for idx in accepted:
-        local_bl = _local_baseline_at_peak(y_smooth, distances, idx, accepted)
-        fw       = _compute_fwhm(distances, y_smooth, idx, local_bl)
+        left_v, right_v = _find_valleys(y_smooth, idx, accepted)
+        local_bl        = _local_baseline(y_smooth, distances, idx, left_v, right_v)
+        fw              = _compute_fwhm(distances, y_smooth, idx, local_bl)  # 시각용
+        gauss           = _fit_gaussian(distances, y, idx, local_bl, left_v, right_v)
+
+        # 메인 FWHM = Gaussian fit 성공 시 Gaussian, 실패 시 walk fallback
+        fwhm_primary = gauss["fwhm"] if gauss["success"] else fw["fwhm"]
+
         peaks.append({
             "x":          float(distances[idx]),
             "y":          float(y[idx]),
-            "fwhm":       fw["fwhm"],
+            # ── 메인 결과 ──
+            "fwhm":       float(fwhm_primary),
+            "r2":         float(gauss["r2"]) if gauss["success"] else np.nan,
+            "fit_ok":     bool(gauss["success"]),
+            "gauss":      gauss,                # full fit params (그래프 overlay용)
+            # ── 시각 보조 (빨간 가로선용, 숫자 표시 X) ──
             "fwhm_left":  fw["left_x"],
             "fwhm_right": fw["right_x"],
             "half_max":   fw["half_max"],
-            "baseline":   local_bl,       # per-peak local baseline (시각화/디버깅용)
+            "baseline":   local_bl,
+            # ── valley 인덱스 (그래프 baseline LINE 그릴 때 사용) ──
+            "left_valley_x":  float(distances[left_v]),
+            "left_valley_y":  float(y_smooth[left_v]),
+            "right_valley_x": float(distances[right_v]),
+            "right_valley_y": float(y_smooth[right_v]),
         })
     return peaks
 
@@ -584,37 +665,39 @@ for f in uploaded:
                     if peaks:
                         px = [p["x"] for p in peaks]
                         py = [p["y"] for p in peaks]
-                        # Local baseline tick (peak 위치에서 baseline 값 표시 — 회색)
+                        # Sloped local baseline lines (valley → valley, 회색 점선)
                         for p in peaks:
-                            ax.plot([p["x"]], [p["baseline"]], marker="_",
-                                    color="gray", markersize=14,
-                                    markeredgewidth=2)
-                        # FWHM 경계선 (반높이 가로 막대) — 진한 빨강
+                            ax.plot([p["left_valley_x"], p["right_valley_x"]],
+                                    [p["left_valley_y"], p["right_valley_y"]],
+                                    color="gray", linestyle="--",
+                                    linewidth=1.0, alpha=0.6)
+                        # Gaussian fit 곡선 overlay (주황색)
                         for p in peaks:
-                            ax.hlines(
-                                y=p["half_max"],
-                                xmin=p["fwhm_left"], xmax=p["fwhm_right"],
-                                colors="red", linewidth=2.5, alpha=0.85,
-                            )
-                            # FWHM 양끝 짧은 수직 tick
-                            tick = (peaks[0]["y"] - p["half_max"]) * 0.05 + 1
-                            ax.vlines(x=[p["fwhm_left"], p["fwhm_right"]],
-                                      ymin=p["half_max"] - tick,
-                                      ymax=p["half_max"] + tick,
-                                      colors="red", linewidth=2.0, alpha=0.85)
+                            if not p["fit_ok"]:
+                                continue
+                            g = p["gauss"]
+                            x_g = np.linspace(p["left_valley_x"], p["right_valley_x"], 100)
+                            y_g = _gauss_func(x_g, g["amp"], g["mu"],
+                                              g["sigma"], g["baseline"])
+                            ax.plot(x_g, y_g, color="darkorange",
+                                    linewidth=1.8, alpha=0.85)
+                        # 시각 보조: 반높이 빨간 가로선 (숫자는 안 보고함)
+                        for p in peaks:
+                            ax.hlines(y=p["half_max"],
+                                      xmin=p["fwhm_left"], xmax=p["fwhm_right"],
+                                      colors="red", linewidth=1.5, alpha=0.5)
                         # Peak 점선 (위치 표시) + 빨간 점
                         for x_p in px:
                             ax.axvline(x=x_p, color="red", linestyle=":",
-                                       linewidth=0.8, alpha=0.4)
+                                       linewidth=0.8, alpha=0.3)
                         ax.plot(px, py, "ro", markersize=8,
                                 markeredgecolor="white", markeredgewidth=1.5,
                                 label=f"Peaks ({len(peaks)})")
-                        # Legend entries (dummy lines)
-                        ax.plot([], [], "r-", linewidth=2.5,
-                                label="FWHM (at half-max)")
-                        ax.plot([], [], marker="_", color="gray", linestyle="",
-                                markersize=14, markeredgewidth=2,
-                                label="Local baseline")
+                        # Legend entries (dummy)
+                        ax.plot([], [], color="darkorange", linewidth=1.8,
+                                label="Gaussian fit")
+                        ax.plot([], [], color="gray", linestyle="--",
+                                linewidth=1.0, label="Local baseline")
                     ax.set_xlabel(
                         f"Distance from left edge of box (px)  ·  "
                         f"Box: {x1 - x0} × {y1 - y0}"
@@ -635,39 +718,63 @@ for f in uploaded:
                         )
                     elif len(peaks) == 1:
                         p0 = peaks[0]
+                        r2_str = (f"R²={p0['r2']:.2f}" if p0["fit_ok"]
+                                  else "fit failed")
                         st.info(
-                            f"**1 peak detected** at position "
-                            f"**{p0['x']:.1f} px** (intensity {p0['y']:.0f}, "
-                            f"FWHM **{p0['fwhm']:.1f} px**). Increase box "
-                            f"width to capture more streaks."
+                            f"**1 peak detected** at **{p0['x']:.1f} px** — "
+                            f"FWHM **{p0['fwhm']:.1f} px** ({r2_str}). "
+                            f"Increase box width to capture more streaks."
                         )
                     else:
                         positions = [p["x"]    for p in peaks]
                         fwhms     = [p["fwhm"] for p in peaks]
+                        r2s       = [p["r2"]   for p in peaks if p["fit_ok"]]
                         spacings  = [positions[j + 1] - positions[j]
                                      for j in range(len(positions) - 1)]
-                        mean_sp   = float(np.mean(spacings))
-                        std_sp    = float(np.std(spacings))
-                        mean_fw   = float(np.mean(fwhms))
-                        std_fw    = float(np.std(fwhms))
+                        mean_sp = float(np.mean(spacings))
+                        std_sp  = float(np.std(spacings))
+                        mean_fw = float(np.mean(fwhms))
+                        std_fw  = float(np.std(fwhms))
+                        mean_r2 = float(np.mean(r2s)) if r2s else float("nan")
 
                         m1, m2, m3, m4 = st.columns(4)
                         m1.metric("Peaks detected", f"{len(peaks)}")
-                        m2.metric("Mean spacing",   f"{mean_sp:.1f} px")
-                        m3.metric("Std (regularity)", f"± {std_sp:.1f} px")
-                        m4.metric("Mean FWHM",      f"{mean_fw:.1f} px",
-                                  delta=f"± {std_fw:.1f} px",
-                                  delta_color="off")
+                        m2.metric("Mean spacing",   f"{mean_sp:.1f} px",
+                                  delta=f"± {std_sp:.1f} px", delta_color="off")
+                        m3.metric("Mean FWHM",      f"{mean_fw:.1f} px",
+                                  delta=f"± {std_fw:.1f} px", delta_color="off")
+                        m4.metric("Mean Fit R²",
+                                  f"{mean_r2:.3f}" if not np.isnan(mean_r2) else "—",
+                                  help="Gaussian fit quality (1.0 = perfect). "
+                                       "≥0.95 reliable, 0.7–0.95 cautious, "
+                                       "<0.7 suspect (non-Gaussian / overlap).")
 
-                        pos_str  = "  ·  ".join(f"{p:.0f}" for p in positions)
-                        sp_str   = "  ·  ".join(f"{s:.0f}" for s in spacings)
-                        fwhm_str = "  ·  ".join(f"{f:.0f}" for f in fwhms)
+                        # Per-peak 상세 — R² 기반 신뢰도 색 코딩
+                        def _rel_marker(r2):
+                            if np.isnan(r2):  return "⚪ fit failed"
+                            if r2 >= 0.95:    return "🟢 reliable"
+                            if r2 >= 0.70:    return "🟡 cautious"
+                            return "🔴 suspect"
+
+                        rows = []
+                        for j, p in enumerate(peaks, start=1):
+                            rows.append(
+                                f"  Peak {j}:  x = {p['x']:>6.1f} px  ·  "
+                                f"FWHM = {p['fwhm']:>5.1f} px  ·  "
+                                f"R² = {p['r2']:.3f}  {_rel_marker(p['r2'])}"
+                                if p["fit_ok"]
+                                else
+                                f"  Peak {j}:  x = {p['x']:>6.1f} px  ·  "
+                                f"FWHM = {p['fwhm']:>5.1f} px (walk fallback)  "
+                                f"⚪ fit failed"
+                            )
+                        sp_str = "  ·  ".join(f"{s:.0f}" for s in spacings)
+
                         st.markdown(
                             f'<div style="font-size:13px;color:#555;'
-                            f'margin-top:8px;line-height:1.7;">'
-                            f'<b>Positions (px):</b> <span style="font-family:monospace;">{pos_str}</span><br>'
-                            f'<b>Spacings (px):</b>  <span style="font-family:monospace;">{sp_str}</span><br>'
-                            f'<b>FWHMs (px):</b>    <span style="font-family:monospace;">{fwhm_str}</span>'
+                            f'margin-top:8px;line-height:1.7;font-family:monospace;">'
+                            + "<br>".join(rows) +
+                            f'<br><br><b>Spacings (px):</b> {sp_str}'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
