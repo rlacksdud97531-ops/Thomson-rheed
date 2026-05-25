@@ -318,10 +318,13 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
     accepted.sort(key=lambda i: distances[i])
 
     # 각 peak 의 valleys → linear baseline → walk FWHM
+    # 위치(index)는 smoothed 로 찾되, FWHM 계산은 RAW 값으로
+    # (raw peak height 와 일관성 — narrow peak 정점이 smoothing 으로 깎여
+    # half_max 가 낮게 잡히는 문제 해결)
     peaks = []
     for idx in accepted:
         left_v, right_v = _find_valleys(y_smooth, idx, accepted)
-        fw              = _compute_fwhm_walk(distances, y_smooth, idx, left_v, right_v)
+        fw              = _compute_fwhm_walk(distances, y, idx, left_v, right_v)
         peaks.append({
             "x":              float(distances[idx]),
             "y":              float(y[idx]),
@@ -330,9 +333,9 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
             "fwhm_right":     fw["right_x"],
             "half_max":       fw["half_max"],
             "left_valley_x":  float(distances[left_v]),
-            "left_valley_y":  float(y_smooth[left_v]),
+            "left_valley_y":  float(y[left_v]),       # raw — gray dashed 가 raw profile 위에
             "right_valley_x": float(distances[right_v]),
-            "right_valley_y": float(y_smooth[right_v]),
+            "right_valley_y": float(y[right_v]),      # raw
         })
     return peaks
 
