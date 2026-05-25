@@ -296,7 +296,11 @@ def detect_peaks(distances: np.ndarray, intensities: np.ndarray,
     k = max(5, n // 40)
     if k % 2 == 0:
         k += 1
-    y_smooth = np.convolve(y, np.ones(k) / k, mode="same")
+    # Edge padding: mode="same" 은 0-padding 으로 가장자리 값이 인위적으로
+    # 낮아지는 artifact 발생. edge value 로 패딩 후 'valid' convolve 사용.
+    pad      = k // 2
+    y_padded = np.pad(y, pad, mode="edge")
+    y_smooth = np.convolve(y_padded, np.ones(k) / k, mode="valid")
 
     # 동적 threshold
     baseline  = float(np.percentile(y_smooth, 20))
