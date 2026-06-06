@@ -1,5 +1,6 @@
 streamlit>=1.32
 tensorflow==2.21.0
+keras==3.14.0
 numpy>=1.26
 pillow>=10.0
 pandas>=2.0
