@@ -1,7 +1,7 @@
 """
 RHEED Pattern Classifier — Public Web App
-EfficientNetB2-based 4-class classifier
-(Mixed / Unclear / Spotty / Streaks)
+MobileNetV3-Small 2-class classifier (Phase 1 prototype)
+(Streak = 2D growth / Spot = 3D growth)
 """
 import os
 import numpy as np
@@ -21,10 +21,10 @@ st.set_page_config(
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Thomson_42_best_model.keras")
-CLASS_NAMES  = ["Mixed", "Unclear", "Spotty", "Streaks"]
-CLASS_COLORS = ["#374151", "#374151", "#374151", "#374151"]  # 단색 (gray-700)
-IMG_SIZE     = (260, 260)
+MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Phase1_2class.keras")
+CLASS_NAMES  = ["Streak", "Spot"]            # 0=2D 성장, 1=3D 성장
+CLASS_COLORS = ["#374151", "#374151"]        # 단색 (gray-700)
+IMG_SIZE     = (224, 224)                    # MobileNetV3-Small 입력
 
 
 # ── Image loading ──────────────────────────────────────────────────────────────
@@ -42,68 +42,19 @@ def safe_open_rgb(src) -> Image.Image:
     return img
 
 
-# ── Crop dark top ────────────────────────────────────────────────────────────
-def crop_dark_top(img: Image.Image) -> Image.Image:
-    """위쪽 어두운 영역(깨진 검정 / 전자총 그림자) 제거.
-
-    핵심 아이디어: 짧은 leakage / scratch 영역은 무시하고, **가장 긴 밝은 띠**
-    (= 실제 RHEED 패턴 + glow)의 시작점에서 자른다.
-
-    1) 행별 평균 밝기 → smoothing
-    2) 적응형 threshold (mean + 0.5*std) 위/아래 binary
-    3) 연속된 bright 구간(run)을 모두 찾아 가장 긴 구간의 시작점에서 crop
-    """
-    arr = np.array(img.convert("L"), dtype=np.float32)
-    h, w = arr.shape
-
-    row_mean = arr.mean(axis=1)
-
-    # Smoothing
-    k = max(15, h // 20)
-    smoothed = np.convolve(row_mean, np.ones(k) / k, mode="same")
-
-    # Threshold
-    threshold = smoothed.mean() + smoothed.std() * 0.5
-    bright = smoothed >= threshold
-
-    # 연속 bright 구간 (run-length)
-    padded = np.concatenate([[False], bright, [False]])
-    diffs = np.diff(padded.astype(np.int32))
-    starts = np.where(diffs == 1)[0]
-    ends = np.where(diffs == -1)[0]
-
-    if len(starts) == 0:
-        return img
-
-    lengths = ends - starts
-    longest_idx = int(lengths.argmax())
-    start = int(starts[longest_idx])
-
-    # 너무 작으면 (전체의 5% 미만) 자르지 않음 (학습 이미지 보호)
-    if start < h * 0.05:
-        return img
-
-    return img.crop((0, start, w, h))
-
-
-# ── Grayscale conversion + auto-contrast ─────────────────────────────────────
-def to_grayscale_rgb(img: Image.Image) -> Image.Image:
-    """초록 인광 → 회색조 → autocontrast → RGB(R=G=B).
-    autocontrast: 최소→0, 최대→255 매핑. 학습 이미지(고대비) 분포에 가까워짐."""
-    gray = img.convert("L")
-    gray = ImageOps.autocontrast(gray)
-    return gray.convert("RGB")
-
-
 # ── Preprocessing ──────────────────────────────────────────────────────────────
 def preprocess(img: Image.Image) -> tuple[np.ndarray, Image.Image]:
-    """검은 상단 제거 → grayscale → autocontrast → resize → normalize.
-    Returns (array, processed_img) — processed_img는 시각화용."""
-    cropped = crop_dark_top(img)
-    gray = to_grayscale_rgb(cropped)
-    resized = gray.resize(IMG_SIZE)
+    """Phase 1 훈련과 동일한 전처리.
+
+    훈련: safe_open_rgb(green RGB) → resize(224) → /255
+      - grayscale 변환 안 함 (초록 인광 RGB 유지)
+      - crop 안 함 (훈련이 raw resize 였으므로 train/test 일관성)
+
+    Returns (array, processed_img) — processed_img 는 시각화용 (모델 입력 그대로).
+    """
+    resized = img.resize(IMG_SIZE)                       # green RGB, 224×224
     arr = (np.array(resized, dtype=np.float32) / 255.0)[np.newaxis]
-    return arr, gray
+    return arr, resized
 
 
 # ── Model loading ──────────────────────────────────────────────────────────────
@@ -361,15 +312,13 @@ with st.sidebar:
 **Classes**
 | Class | Pattern |
 |---|---|
-| Mixed | Periodic streak modulation |
-| Unclear | Irregular transmission spots |
-| Spotty | Discrete 3D island spots |
-| Streaks | Smooth 2D growth streaks |
+| Streak | Smooth 2D growth (streaks) |
+| Spot | 3D island growth (spots) |
 
 ---
 """
     )
-    st.caption(f"Model: Thomson_42 · TF {tf.__version__}")
+    st.caption(f"Model: Phase1 (2-class) · TF {tf.__version__}")
     st.caption("© 2026 rlack")
 
 
@@ -451,8 +400,8 @@ for f in uploaded:
             st.pyplot(fig)
             plt.close(fig)
 
-            # Streak / Mixed 일 때만 reconstruction 표시
-            if cls in ("Streaks", "Mixed"):
+            # Streak 일 때만 reconstruction 표시
+            if cls == "Streak":
                 recon = detect_reconstruction(arr[0])
                 st.markdown(
                     f'<div style="font-size:14px;color:#555;margin-top:6px;">'
