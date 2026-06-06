@@ -4,6 +4,7 @@ EfficientNetB2 2-class classifier (Phase 1 prototype)
 (Streak = 2D growth / Spot = 3D growth)
 """
 import os
+import io
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -446,6 +447,19 @@ for f in uploaded:
             st.image(img, caption=f"Original: {f.name}", use_container_width=True)
         with c_gray:
             st.image(gray_img, use_container_width=True)
+            # 잘린(전처리된) 이미지 다운로드 — 훈련 데이터 수집용.
+            # full 해상도 crop+grayscale (224 resize 전 → 나중에 유연하게).
+            processed_full = to_grayscale_rgb(crop_dark_top(img))
+            _buf = io.BytesIO()
+            processed_full.save(_buf, format="PNG")
+            st.download_button(
+                "⬇️ Download cropped",
+                data=_buf.getvalue(),
+                file_name=f"{os.path.splitext(f.name)[0]}_cropped.png",
+                mime="image/png",
+                key=f"dl_{f.name}",
+                use_container_width=True,
+            )
         with c_res:
             fig = plot_probs(prob)
             st.pyplot(fig)
