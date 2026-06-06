@@ -42,6 +42,43 @@ def safe_open_rgb(src) -> Image.Image:
     return img
 
 
+# ── Crop dark top ─────────────────────────────────────────────────────────────
+def crop_dark_top(img: Image.Image) -> Image.Image:
+    """위쪽 어두운 영역(전자총 그림자 / 반사) 제거 → 패턴 영역만 남김.
+
+    훈련 데이터는 이미 패턴 ROI 로 잘려 있으나, 사용자 업로드는 full frame
+    (위쪽 검은 영역 포함)인 경우가 많음. 자동으로 잘라 훈련 분포에 맞춘다.
+
+    1) 행별 평균 밝기 → smoothing
+    2) 적응형 threshold (mean + 0.5*std) 로 bright 행 판별
+    3) 가장 긴 연속 bright 구간의 시작점에서 crop (짧은 leakage 무시)
+    """
+    arr = np.array(img.convert("L"), dtype=np.float32)
+    h, w = arr.shape
+
+    row_mean = arr.mean(axis=1)
+    k = max(15, h // 20)
+    smoothed = np.convolve(row_mean, np.ones(k) / k, mode="same")
+
+    threshold = smoothed.mean() + smoothed.std() * 0.5
+    bright = smoothed >= threshold
+
+    padded = np.concatenate([[False], bright, [False]])
+    diffs  = np.diff(padded.astype(np.int32))
+    starts = np.where(diffs == 1)[0]
+    ends   = np.where(diffs == -1)[0]
+    if len(starts) == 0:
+        return img
+
+    longest_idx = int((ends - starts).argmax())
+    start = int(starts[longest_idx])
+
+    # 너무 위쪽(<5%)이면 자르지 않음 (이미 잘린 이미지 보호)
+    if start < h * 0.05:
+        return img
+    return img.crop((0, start, w, h))
+
+
 # ── Grayscale conversion + auto-contrast ─────────────────────────────────────
 def to_grayscale_rgb(img: Image.Image) -> Image.Image:
     """회색조 → autocontrast → RGB(R=G=B).
@@ -57,14 +94,15 @@ def to_grayscale_rgb(img: Image.Image) -> Image.Image:
 
 # ── Preprocessing ──────────────────────────────────────────────────────────────
 def preprocess(img: Image.Image) -> tuple[np.ndarray, Image.Image]:
-    """Phase 1 훈련과 동일한 전처리.
+    """검은 상단 제거 → grayscale → autocontrast → resize → normalize.
 
-    훈련: 16-bit grayscale → min-max 정규화(=autocontrast) → RGB(R=G=B)
-          → resize(224) → /255   (crop 없음 — 데이터가 이미 ROI)
+    훈련 데이터(패턴 ROI, grayscale)와 분포를 맞춤:
+      crop_dark_top → grayscale+autocontrast → resize(224) → /255
 
     Returns (array, processed_img) — processed_img 는 시각화용 (모델 입력 그대로).
     """
-    gray    = to_grayscale_rgb(img)                      # grayscale + autocontrast
+    cropped = crop_dark_top(img)                          # 위쪽 검은 영역 제거
+    gray    = to_grayscale_rgb(cropped)                   # grayscale + autocontrast
     resized = gray.resize(IMG_SIZE)                       # 224×224
     arr = (np.array(resized, dtype=np.float32) / 255.0)[np.newaxis]
     return arr, resized
