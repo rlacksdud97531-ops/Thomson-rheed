@@ -42,17 +42,30 @@ def safe_open_rgb(src) -> Image.Image:
     return img
 
 
+# ── Grayscale conversion + auto-contrast ─────────────────────────────────────
+def to_grayscale_rgb(img: Image.Image) -> Image.Image:
+    """회색조 → autocontrast → RGB(R=G=B).
+
+    훈련 데이터(16-bit)는 safe_open_rgb 에서 min-max 정규화되어 grayscale
+    R=G=B 로 변환됨. autocontrast(min-max stretch)가 같은 분포를 만듦.
+    → grayscale + autocontrast 는 훈련과 일치 (컬러 업로드도 grayscale 로 통일).
+    """
+    gray = img.convert("L")
+    gray = ImageOps.autocontrast(gray)
+    return gray.convert("RGB")
+
+
 # ── Preprocessing ──────────────────────────────────────────────────────────────
 def preprocess(img: Image.Image) -> tuple[np.ndarray, Image.Image]:
     """Phase 1 훈련과 동일한 전처리.
 
-    훈련: safe_open_rgb(green RGB) → resize(224) → /255
-      - grayscale 변환 안 함 (초록 인광 RGB 유지)
-      - crop 안 함 (훈련이 raw resize 였으므로 train/test 일관성)
+    훈련: 16-bit grayscale → min-max 정규화(=autocontrast) → RGB(R=G=B)
+          → resize(224) → /255   (crop 없음 — 데이터가 이미 ROI)
 
     Returns (array, processed_img) — processed_img 는 시각화용 (모델 입력 그대로).
     """
-    resized = img.resize(IMG_SIZE)                       # green RGB, 224×224
+    gray    = to_grayscale_rgb(img)                      # grayscale + autocontrast
+    resized = gray.resize(IMG_SIZE)                       # 224×224
     arr = (np.array(resized, dtype=np.float32) / 255.0)[np.newaxis]
     return arr, resized
 
