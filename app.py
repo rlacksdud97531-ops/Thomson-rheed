@@ -1,6 +1,6 @@
 """
 RHEED Pattern Classifier — Public Web App
-MobileNetV3-Small 2-class classifier (Phase 1 prototype)
+EfficientNetB2 2-class classifier (Phase 1 prototype)
 (Streak = 2D growth / Spot = 3D growth)
 """
 import os
@@ -21,7 +21,7 @@ st.set_page_config(
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Phase1_2class.keras")
+MODEL_PATH   = os.path.join(os.path.dirname(__file__), "models", "Phase1_2class_effnet.keras")
 CLASS_NAMES  = ["Streak", "Spot"]            # 0=2D 성장, 1=3D 성장
 CLASS_COLORS = ["#374151", "#374151"]        # 단색 (gray-700)
 IMG_SIZE     = (224, 224)                    # MobileNetV3-Small 입력
@@ -369,7 +369,7 @@ with st.sidebar:
 ---
 """
     )
-    st.caption(f"Model: Phase1 (2-class) · TF {tf.__version__}")
+    st.caption(f"Model: Phase1 EfficientNetB2 (2-class, 98.8%) · TF {tf.__version__}")
     st.caption("© 2026 rlack")
 
 
